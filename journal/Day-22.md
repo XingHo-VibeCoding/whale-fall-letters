@@ -98,6 +98,18 @@ book-002 的笔记 1 → 1（未受波及）
 改用 `GET /api/books/book-001`，返回新文案「本服务提供 GET/POST /api/books 与 PATCH/DELETE /api/books/:id」，
 这才证明新代码生效。教训：**探针必须走网关已映射的路径，否则测的是网关不是函数**。
 
+### 4.5 截图
+
+![Day 22 · PATCH 前后对比](./assets/Day-22-after-patch.png)
+
+![Day 22 · DELETE 后 GET 不再返回](./assets/Day-22-after-delete.png)
+
+截图取自 `day22-verify/shot-1-patch.html` 与 `shot-2-delete.html`（由 `summarize.js` / `make-shot-pages.js` 直接读 `e2e-*.json` 生成，数字与接口报文一一对应，不是手画的）。
+
+> 如实记录两处瑕疵：① 两张都是浏览器视口截图，滚动后拍的，页面顶部的「大标题 + 接口地址 / 靶子 id / 生成时间」被滚出画面，
+> 但表格数据、报文代码块完整；② 画面底部带进了 Windows 任务栏与浏览器标签栏。
+> 不影响数据核对（数字来自真库报文），只是不够干净。
+
 ## 五、完成标准逐条对照
 
 | 完成标准 | 状态 | 证据 |
@@ -107,7 +119,7 @@ book-002 的笔记 1 → 1（未受波及）
 | 增删改查四类操作闭环 | ✅ | 增→查→改→复核→删→再查，六个请求全 200 |
 | 今日不做：批量操作 / 用户系统 | ✅ 守住了 | 未新增任何批量接口，未动用户相关代码 |
 | 余力加练：软删除（is_deleted） | ⏳ 未做 | 需 `ALTER TABLE` 加列 + 改 GET/PATCH 过滤条件；今天先把硬删闭环拿到，软删除记为待办 |
-| 截图两张 | ⏳ 待归档 | 对照页已生成 `day22-verify/report.html`；图片待存入 `journal/assets/` |
+| 截图两张 | ✅ 已归档 | `assets/Day-22-after-patch.png`（改前/改后逐字段，黄底三行）、`assets/Day-22-after-delete.png`（5 本列表里已无该 id）；顶部标题被滚出画面，已在 4.5 如实标注 |
 
 ## 六、改动文件清单与归属
 
@@ -131,7 +143,6 @@ book-002 的笔记 1 → 1（未受波及）
 
 ## 八、待办
 
-- [ ] 两张截图存入 `journal/assets/`（`Day-22-after-patch.*`、`Day-22-after-delete.*`）并回填本文
 - [ ] 软删除（`is_deleted`）：加列 + 查询过滤 + 删错了能找回
 - [ ] 前端删书按钮的二次确认弹窗（今天只做了接口层的确认）
 - [ ] （跨天）`journal/Day-11.md` ~ `Day-21.md` 仍缺，补不补等定
