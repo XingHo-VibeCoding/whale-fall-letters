@@ -117,18 +117,33 @@
 - 响应 data：`{ "book": <book> }`（含后端生成的 id 和时间戳）
 - 错误示例：`{ "ok": false, "error": "书名不能为空" }`
 
-### 🕐 3.3 PATCH /api/books/:id —— 修改书籍（状态 / 进度 / 资料）
+### ✅ 3.3 PATCH /api/books/:id —— 修改书籍（状态 / 进度 / 资料）
 
 - 请求 body：要改的字段（部分更新），如 `{ "status": "reading", "currentPage": 42 }`
+  - 只接受白名单字段：`title` / `author` / `coverUrl` / `status` / `totalPages` / `currentPage`；
+    `id`、`createdAt` 等传入后**静默忽略**（主键与创建时间不归客户端决定）
+  - 一个可改字段都没有时返回 `{ok:false}`「没有可修改的字段…」，不做空更新
+  - `title` 传了必须非空；`status` 走三值白名单；页数必须非负整数，可传 `null` 清空
 - 约定：`status` 变为 `reading` / `finished` 时由后端维护 `startedAt` / `finishedAt`
+  （**只补空、不覆盖**：同一状态来回切不会刷掉第一次的时间）
 - 响应 data：`{ "book": <book> }`（改后的完整对象）
-- 错误示例：`"这本书不存在，可能已被删除"`
+- 错误示例：`"这本书不存在，可能已被删除"` / `"书 id 不能为空，正确写法：/api/books/book-001"`
+- 实现：`cloud/functions/books/index.js` 的 `handlePatch` + `db.js` 的 `findBookById` / `updateBook`（Day 22）
+- 验证（Day 22）：公网真库新建临时书 → PATCH `{"status":"reading","currentPage":42}`
+  → `status` 由 `want` 变 `reading`、`currentPage` 由 `null` 变 `42`、`startedAt` 由 `null` 被自动补上；
+  不存在 id / 空 body / 非法状态 / 空书名 / 负页码 / 空 id 六类输入均被拦下
 
-### 🕐 3.4 DELETE /api/books/:id —— 删除书籍
+### ✅ 3.4 DELETE /api/books/:id —— 删除书籍
 
 - 级联约定：**连同该书全部笔记一起删除**（对应 PRD AC-10）
-- 响应 data：`{ "deletedBooks": 1, "deletedNotes": <n> }`
+  - 顺序固定为「先删笔记、再删书」：反过来的话笔记得不到 `bookId` 归属，会成孤儿数据
+- 响应 data：`{ "deletedBooks": 1, "deletedNotes": <n> }` ——**真实影响行数**，不是写死的 1
 - 错误示例：`"这本书不存在，可能已被删除"`
+- 实现：`cloud/functions/books/index.js` 的 `handleDelete` + `db.js` 的 `deleteNotesByBookId` / `deleteBook`（Day 22）
+- 验证（Day 22）：
+  - 公网真库删临时书 → `{deletedBooks:1, deletedNotes:0}`，随后 GET 列表由 6 本回到 5 本、该 id 已不在
+  - 本地假数据源验级联 → 删 `book-003` 返回 `{deletedBooks:1, deletedNotes:2}`，该书 2 条笔记归零、`book-002` 的 1 条未受波及
+  - 重复删 / 空 id / 含斜杠 id 三类输入均被拦下（空 id 在接口层就停，不发请求到数据库）
 
 ### 🕐 3.5 GET /api/notes?bookId=xxx —— 某本书的笔记列表
 

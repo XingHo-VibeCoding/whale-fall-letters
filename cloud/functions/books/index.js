@@ -3,6 +3,8 @@
  *
  * Day 17：GET  读书单列表（契约 3.1）
  * Day 18：POST 新增一本书（契约 3.2）——本函数第一次拥有「写入真库」的能力
+ * Day 22：PATCH 修改一本书（契约 3.3）——只改传上来的字段，没传的不动
+ * Day 22：DELETE 删除一本书（契约 3.4）——连同该书笔记一起删
  *
  * ⚠️ 为什么不直连数据库：官方社区确认（Issue #953），HTTP 型云函数与
  *   云开发数据库之间不走内网、不支持 VPC，体验版也没有公网直连开关。
@@ -157,9 +159,229 @@ function newId(prefix) {
   return `${prefix}-${Date.now().toString(36)}${Math.random().toString(36).slice(2, 8)}`;
 }
 
+// ---------- Day 22：PATCH 的路由解析与输入校验 ----------
+
+// 允许前端改的字段白名单。id / createdAt 这些不在这里：
+// 主键改了等于换了本书，创建时间改了等于伪造历史，都不该由客户端决定。
+// 不在白名单里的键【静默忽略】而不是报错——前端多传个 isbn 之类不该让整个请求失败。
+const PATCHABLE_FIELDS = [
+  "title",
+  "author",
+  "coverUrl",
+  "status",
+  "totalPages",
+  "currentPage",
+];
+
+// 从 /api/books/<id> 里取出 id。返回 { id } / { error }。
+// ⚠️ 这是删除/修改类接口的第一道安全阀：id 取不到就绝不能往下走。
+//    「条件为空就等于匹配所有行」——漏掉这层，一个 DELETE /api/books/
+//    就可能被拼成不带条件的整表删除。
+function matchBookId(pathname) {
+  if (!pathname.startsWith("/api/books/")) return { notMatched: true };
+
+  const raw = pathname.slice("/api/books/".length).replace(/\/$/, ""); // 去掉可能的结尾斜杠
+  if (raw === "") return { error: "书 id 不能为空，正确写法：/api/books/book-001" };
+  if (raw.includes("/")) return { error: "书 id 格式不对，不应该包含斜杠" };
+
+  let id;
+  try {
+    id = decodeURIComponent(raw); // 中文/空格等在 URL 里是百分号编码，先还原
+  } catch {
+    return { error: "书 id 的编码格式不对" };
+  }
+  if (id.length > 40) return { error: "书 id 太长，最多 40 个字符" };
+  return { id };
+}
+
+// PATCH 的字段校验：部分更新，只校验「传了的」字段，没传的一律不管。
+// 返回 { patch } 或 { error }。patch 里只放白名单字段，值为筛过的干净值。
+function validatePatch(body) {
+  if (body === null || typeof body !== "object" || Array.isArray(body)) {
+    return { error: "请求体必须是一个 JSON 对象，例如 { \"status\": \"reading\" }" };
+  }
+
+  const patch = {};
+  for (const key of PATCHABLE_FIELDS) {
+    if (Object.prototype.hasOwnProperty.call(body, key)) patch[key] = body[key];
+  }
+  if (Object.keys(patch).length === 0) {
+    return {
+      error: `没有可修改的字段，允许修改的是：${PATCHABLE_FIELDS.join("、")}`,
+    };
+  }
+
+  // ---- title：传了就不能是空串 ----
+  if (patch.title !== undefined) {
+    if (typeof patch.title !== "string" || patch.title.trim() === "") {
+      return { error: "书名不能为空" };
+    }
+    patch.title = patch.title.trim();
+  }
+
+  // ---- status：白名单 ----
+  if (patch.status !== undefined && !STATUS_WHITELIST.includes(patch.status)) {
+    return { error: "阅读状态只能是 want、reading 或 finished" };
+  }
+
+  // ---- author / coverUrl：必须是文本；传 null 视为清空（存空串，与建表默认值一致）----
+  for (const [key, label] of [["author", "作者"], ["coverUrl", "封面地址"]]) {
+    if (patch[key] === undefined) continue;
+    if (patch[key] === null) {
+      patch[key] = "";
+      continue;
+    }
+    if (typeof patch[key] !== "string") return { error: `${label}必须是文本` };
+    patch[key] = patch[key].trim();
+  }
+
+  // ---- totalPages / currentPage：可传 null 清空，否则必须是非负整数 ----
+  // 与 POST 的口径一致（同一批字段，不该两个接口两套规矩）
+  for (const [key, label] of [["totalPages", "总页数"], ["currentPage", "当前页码"]]) {
+    if (patch[key] === undefined || patch[key] === null) continue;
+    if (!Number.isInteger(patch[key]) || patch[key] < 0) {
+      return { error: `${label}必须是非负整数` };
+    }
+  }
+
+  return { patch };
+}
+
+// PATCH /api/books/:id 的处理体（写在路由外面，是为了能用 async/await 线性读）
+async function handlePatch(req, res, id, baseUrl, apiKey) {
+  let raw;
+  try {
+    raw = await readBody(req);
+  } catch (err) {
+    fail(res, err.message === "请求体太大" ? "请求体太大，请减小内容后重试" : "读取请求失败");
+    log("PATCH", `/api/books/${id}`, "400", err.message);
+    return;
+  }
+
+  let body;
+  try {
+    body = JSON.parse(raw);
+  } catch {
+    fail(res, "请求体不是合法的 JSON");
+    log("PATCH", `/api/books/${id}`, "400", "JSON 解析失败");
+    return;
+  }
+
+  const { patch, error } = validatePatch(body);
+  if (error) {
+    fail(res, error);
+    log("PATCH", `/api/books/${id}`, "400", error);
+    return;
+  }
+
+  if (!apiKey) {
+    fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
+    log("PATCH", `/api/books/${id}`, "500", "缺少 PG_API_KEY");
+    return;
+  }
+
+  try {
+    // 第一层保护：先确认这本书真的存在。不存在就别往下改，
+    // 免得「改了 0 行」被当成成功回报给前端。
+    const current = await db.findBookById(id, baseUrl, apiKey);
+    if (!current) {
+      fail(res, "这本书不存在，可能已被删除");
+      log("PATCH", `/api/books/${id}`, "404", "查无此书");
+      return;
+    }
+
+    // 契约 3.3：status 变成 reading / finished 时，由后端维护时间戳。
+    // 刻意只「补空」不「覆盖/清空」：同一状态来回切不该刷掉第一次的开始时间，
+    // 而且这里只补时间、不改状态本身，逻辑简单、出错面小。
+    const now = new Date().toISOString();
+    if (patch.status === "reading" && !current.startedAt) {
+      patch.startedAt = now;
+    }
+    if (patch.status === "finished" && !current.finishedAt) {
+      patch.finishedAt = now;
+    }
+
+    const updated = await db.updateBook(id, patch, baseUrl, apiKey);
+    if (!updated) {
+      // 极端情况：查到之后、改之前这条被别人删了。
+      // 不报成功——影响 0 行就是没改到。
+      fail(res, "这本书不存在，可能已被删除");
+      log("PATCH", `/api/books/${id}`, "404", "更新影响 0 行");
+      return;
+    }
+
+    log(
+      "PATCH",
+      `/api/books/${id}`,
+      "200",
+      `改 ${Object.keys(patch).join(",")} ｜《${updated.title}》`
+    );
+    // 契约 3.3：返回改后的完整对象
+    send(res, { ok: true, data: { book: updated } });
+  } catch (err) {
+    const why = err.name === "TimeoutError" ? "请求超时" : err.message;
+    fail(res, `数据源暂时不可用：${why}`);
+    log("PATCH", `/api/books/${id}`, "500", why);
+  }
+}
+
+
 // ---------- 数据访问层已拆到 db.js（Day 19） ----------
 // 原 fetchBooks / findDuplicate / insertBook 三个函数原样搬去 db.js，
 // 本文件通过文件开头的 require("./db") 调用，函数体一行逻辑没改。
+
+// DELETE /api/books/:id 的处理体。
+// 今天要掌握的问题——「删除为什么比新增更容易出事」——答案就在这个函数的顺序里：
+//   新增是加法，错了最多多一条垃圾数据，删掉就行；
+//   删除是减法，错了数据就没了，接口层没有任何撤销手段。
+// 所以删除这条路必须比新增更保守，本函数做了三层：
+//   ① 先确认真实存在（不盲删）
+//   ② 只按 id 精确删（id 为空就停，绝不发空条件请求）
+//   ③ 只认数据源回来的真实影响行数（0 行就是失败，不谎报成功）
+async function handleDelete(req, res, id, baseUrl, apiKey) {
+  if (!apiKey) {
+    fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
+    log("DELETE", `/api/books/${id}`, "500", "缺少 PG_API_KEY");
+    return;
+  }
+
+  try {
+    // ① 先确认这本书真的在。不在就直接报错——不要试图去删一个不存在的东西，
+    //    那样只会得到「删除成功 0 行」这种既没意义又容易让人误会的结论。
+    const current = await db.findBookById(id, baseUrl, apiKey);
+    if (!current) {
+      fail(res, "这本书不存在，可能已被删除");
+      log("DELETE", `/api/books/${id}`, "404", "查无此书");
+      return;
+    }
+
+    // ② 级联顺序不能反：先删笔记，再删书。
+    //    先删书的话，笔记的 bookId 就指向了一条不存在的记录，
+    //    既成了孤儿数据，也没法再靠 bookId 找回该删哪些。
+    const deletedNotes = await db.deleteNotesByBookId(id, baseUrl, apiKey);
+    const deletedBooks = await db.deleteBook(id, baseUrl, apiKey);
+
+    // ③ 数据源说删了 0 行 = 没删到，就不能回成功。
+    if (deletedBooks === 0) {
+      fail(res, "这本书不存在，可能已被删除");
+      log("DELETE", `/api/books/${id}`, "404", "删除影响 0 行");
+      return;
+    }
+
+    log(
+      "DELETE",
+      `/api/books/${id}`,
+      "200",
+      `删《${current.title}》，书 ${deletedBooks} 行、笔记 ${deletedNotes} 条`
+    );
+    // 契约 3.4：返回真实删除数量
+    send(res, { ok: true, data: { deletedBooks, deletedNotes } });
+  } catch (err) {
+    const why = err.name === "TimeoutError" ? "请求超时" : err.message;
+    fail(res, `删除失败，数据源暂时不可用：${why}`);
+    log("DELETE", `/api/books/${id}`, "500", why);
+  }
+}
 
 const server = http.createServer((req, res) => {
   const url = new URL(req.url, "http://localhost");
@@ -264,8 +486,39 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ---------- PATCH /api/books/:id（Day 22 新增） ----------
+  if (req.method === "PATCH") {
+    const m = matchBookId(url.pathname);
+    if (!m.notMatched) {
+      // 连 id 都没解析出来就停在这里：绝不让「id 为空」的请求走到底层
+      if (m.error) {
+        fail(res, m.error);
+        log("PATCH", url.pathname, "400", m.error);
+        return;
+      }
+      handlePatch(req, res, m.id, baseUrl, apiKey);
+      return;
+    }
+  }
+
+  // ---------- DELETE /api/books/:id（Day 22 新增） ----------
+  if (req.method === "DELETE") {
+    const m = matchBookId(url.pathname);
+    if (!m.notMatched) {
+      // ⚠️ 最关键的一道门：id 没解析出来就到此为止。
+      // 删除请求一旦带着空条件下发到数据库，删的就不是「一本书」而是整张表。
+      if (m.error) {
+        fail(res, m.error);
+        log("DELETE", url.pathname, "400", m.error);
+        return;
+      }
+      handleDelete(req, res, m.id, baseUrl, apiKey);
+      return;
+    }
+  }
+
   // 备注：浏览器跨域 POST 会先发 OPTIONS 预检（网关跨域设置已覆盖，函数不用管）。
-  fail(res, "未知路径，本服务只提供 GET /api/books 和 POST /api/books");
+  fail(res, "未知路径，本服务提供 GET/POST /api/books 与 PATCH/DELETE /api/books/:id");
   log(req.method, url.pathname, "404", "未知路径");
 });
 

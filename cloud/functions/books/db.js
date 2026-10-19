@@ -64,6 +64,92 @@ async function findDuplicate(title, author, baseUrl, apiKey) {
   );
 }
 
+// 读单本（Day 22）：按 id 查一行，查不到返回 null。
+// PATCH 之前必须先调它——「先确认这本书在不在」是今天的核心动作：
+// 不查就改，改到 0 行也会被当成成功，用户以为改了、其实什么都没发生。
+async function findBookById(id, baseUrl, apiKey) {
+  const params = new URLSearchParams({ select: "*", id: `eq.${id}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`数据源返回 HTTP ${resp.status}`);
+  }
+  const rows = await resp.json(); // 形状是数组（PostgREST 永远返回数组）
+  return rows[0] || null;
+}
+
+// 改（Day 22）：部分更新。patch 里只有要改的字段，没传的列数据库不动。
+//   PATCH /v1/rdb/rest/books?id=eq.<id>
+//   Prefer: return=representation  → 让数据源把「改后那一行」回给我们
+// 不加这个头，PostgREST 默认返回 204 空响应，接口就没法把改后的结果给前端。
+// 影响 0 行时它返回的是空数组 []，这里转成 null，让上层能分辨「没改到东西」。
+async function updateBook(id, patch, baseUrl, apiKey) {
+  const params = new URLSearchParams({ id: `eq.${id}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(patch),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`数据源返回 HTTP ${resp.status}`);
+  }
+  const rows = await resp.json();
+  return rows[0] || null;
+}
+
+// 删笔记（Day 22）：把某本书名下的笔记全部删掉，返回真实删掉的条数。
+// 契约 3.4 / PRD AC-10 要求删书时级联删笔记；schema.sql 里没建物理外键，
+// 所以这条级联关系只能靠代码保证——顺序必须是「先删笔记，再删书」。
+// 反过来先删书，笔记就成了找不到主人的孤儿数据，而且再也查不出该删哪些。
+async function deleteNotesByBookId(bookId, baseUrl, apiKey) {
+  // ⚠️ 最后一道保险：没有 bookId 就不许发请求。
+  // 条件为空 = 匹配整张笔记表，这一下会把所有书的笔记全删掉。
+  if (!bookId) throw new Error("deleteNotesByBookId 缺少 bookId，已中止");
+
+  const params = new URLSearchParams({ bookId: `eq.${bookId}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes?${params}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Prefer: "return=representation", // 让数据源把删掉的行回给我们，条数才是真的
+    },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`数据源返回 HTTP ${resp.status}`);
+  }
+  const rows = await resp.json();
+  return rows.length; // 真实影响行数，不是猜的
+}
+
+// 删书（Day 22）：按 id 精确删一行，返回真实删掉的行数（0 = 什么都没删到）。
+// 同样带 id 空值保险——删除接口一旦让空条件溜到数据库，就是整表清空。
+async function deleteBook(id, baseUrl, apiKey) {
+  if (!id) throw new Error("deleteBook 缺少 id，已中止");
+
+  const params = new URLSearchParams({ id: `eq.${id}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
+    method: "DELETE",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      Prefer: "return=representation",
+    },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`数据源返回 HTTP ${resp.status}`);
+  }
+  const rows = await resp.json();
+  return rows.length;
+}
+
 // 写：往 books 表插一行。row 就是要插入的行对象（键=驼峰列名），
 // HTTP 201 Created = 插入成功（PostgREST 约定）。
 async function insertBook(row, baseUrl, apiKey) {
@@ -81,4 +167,12 @@ async function insertBook(row, baseUrl, apiKey) {
   }
 }
 
-module.exports = { fetchBooks, findDuplicate, insertBook };
+module.exports = {
+  fetchBooks,
+  findDuplicate,
+  findBookById,
+  updateBook,
+  insertBook,
+  deleteNotesByBookId,
+  deleteBook,
+};
