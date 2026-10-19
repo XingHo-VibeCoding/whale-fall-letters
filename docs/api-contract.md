@@ -13,9 +13,24 @@
 
 ### 1.1 基地址
 
-| 环境 | 基地址 |
+**公网接口（前端 → 云函数），两个域名都指向同一套函数，任选其一：**
+
+| 优先级 | 基地址 | 实测记录 |
+|---|---|---|
+| **首选** | `https://reading-sea-d7gd8l7o78b7304ae.service.tcloudbase.com` | Day 19 实测可用；**Day 22 的 PATCH / DELETE 真库闭环全程走它**（六个请求全 200） |
+| 备用 | `https://reading-sea-d7gd8l7o78b7304ae-1385227197.ap-shanghai.app.tcloudbase.com` | 时好时坏：Day 19 上午报 `INVALID_ENV`，Day 20 下午复测恢复（books 返 200 真数据）；Day 22 未复测 |
+
+> ⚠️ 网关只映射 `/api/books` 前缀（Day 22 实测）：其他路径（如 `/api/no-such-path`）在网关层就被拦下，
+> 返回 `{"code":"INVALID_PATH"}`，**请求根本到不了函数**。排查时别把网关的 404 当成函数的 bug；
+> 要探测函数版本，请用 `GET /api/books/book-001` 这类已映射路径。
+
+> 前端 `community.js` 的 `API_DEMO_URL` 从 Day 20 起用的是首选（service）域名。
+
+**数据 API（云函数 → 数据库），与上面不是一回事：**
+
+| 用途 | 基地址 |
 |---|---|
-| CloudBase HTTP 网关（公网） | `https://reading-sea-d7gd8l7o78b7304ae-1385227197.ap-shanghai.app.tcloudbase.com` |
+| PG HTTP API（PostgREST 风格，云函数内部调用） | `https://reading-sea-d7gd8l7o78b7304ae.api.tcloudbasegateway.com` |
 
 > ⚠️ 更正（Day 17）：此前记录的域名把环境 ID 抄错了两处（小写 l 抄成 i、字母 b 抄成 6），
 > 导致访问一直返回 INVALID_ENV，并被误判成「腾讯侧关闭了公网服务」。
