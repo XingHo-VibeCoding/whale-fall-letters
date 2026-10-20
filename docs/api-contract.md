@@ -148,17 +148,22 @@
   → `status` 由 `want` 变 `reading`、`currentPage` 由 `null` 变 `42`、`startedAt` 由 `null` 被自动补上；
   不存在 id / 空 body / 非法状态 / 空书名 / 负页码 / 空 id 六类输入均被拦下
 
-### ✅ 3.4 DELETE /api/books/:id —— 删除书籍
+### ✅ 3.4 DELETE /api/books/:id —— 删除书籍（Day 23 起改为软删除）
 
-- 级联约定：**连同该书全部笔记一起删除**（对应 PRD AC-10）
-  - 顺序固定为「先删笔记、再删书」：反过来的话笔记得不到 `bookId` 归属，会成孤儿数据
-- 响应 data：`{ "deletedBooks": 1, "deletedNotes": <n> }` ——**真实影响行数**，不是写死的 1
+- 删除方式：**软删除**。只把 `books.is_deleted` 置为 `true`，行仍留在表里，删错了能找回
+  - 找回办法：`UPDATE books SET "is_deleted" = FALSE WHERE "id" = '...'`（一句 SQL，不需要新增接口）
+  - 接口侧三处查询（列表 / 查单本 / 查重）都带 `is_deleted = false` 过滤，被软删的书对外等于不存在
+  - ⚠️ 部署顺序：**先**跑 `db/migration-20261020-soft-delete.sql` 加列，**再**部署新代码；反了会报 `column is_deleted does not exist`
+- 笔记处理（Day 23 起）：**不再跟随删除，故意保留** —— "删错可找回"要完整，书一恢复笔记也都在
+  - 与 Day 22 的「先删笔记、再删书」不同；PRD AC-10 的措辞已同步更改
+- 响应 data：`{ "deletedBooks": 1, "deletedNotes": 0, "softDeleted": true }`
+  - `deletedBooks` 是**真实影响行数**，不是写死的 1；重复删除返回 0 行，接口报错而不谎报成功
+  - `deletedNotes` 保留字段以兼容旧调用，恒为 0（笔记不删）
 - 错误示例：`"这本书不存在，可能已被删除"`
-- 实现：`cloud/functions/books/index.js` 的 `handleDelete` + `db.js` 的 `deleteNotesByBookId` / `deleteBook`（Day 22）
-- 验证（Day 22）：
-  - 公网真库删临时书 → `{deletedBooks:1, deletedNotes:0}`，随后 GET 列表由 6 本回到 5 本、该 id 已不在
-  - 本地假数据源验级联 → 删 `book-003` 返回 `{deletedBooks:1, deletedNotes:2}`，该书 2 条笔记归零、`book-002` 的 1 条未受波及
-  - 重复删 / 空 id / 含斜杠 id 三类输入均被拦下（空 id 在接口层就停，不发请求到数据库）
+- 实现：`index.js` 的 `handleDelete` + `db.js` 的 `softDeleteBook`（Day 23）；硬删 `deleteBook` 保留但接口不再调用
+- 验证：
+  - Day 22（硬删时期）：公网真库删临时书 → `{deletedBooks:1, deletedNotes:0}`，随后 GET 列表由 6 本回到 5 本
+  - Day 23 软删除回合（本地假数据源）：5 本 → 软删 1 本 → 列表变 4 本 → 重复删报"不存在" → 改已删的书报"不存在" → 同名书可重新添加 → 手工恢复后回到 6 本
 
 ### 🕐 3.5 GET /api/notes?bookId=xxx —— 某本书的笔记列表
 

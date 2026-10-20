@@ -2514,20 +2514,64 @@
     s.classList.toggle('is-error', !!isError);
   }
 
+  // ===== Day 23：把三类裸报错翻成人话 =====
+  // fetch 失败有三种完全不同的原因，浏览器给的却可能是同一句英文：
+  //   ① 网络层：请求根本没送出去       → TypeError: Failed to fetch（连状态码都没有）
+  //   ② HTTP 层：送到了，对端回非 2xx  → 以前只显示 "HTTP 502"，看不出该找谁
+  //   ③ 业务层：对端正常答话但说"不行" → 后端给的中文本来就是人话，原样透传
+  // 三种该做的事完全不同（查网络 / 等一会重试 / 改输入），所以不能糊成一句"加载失败"。
+  // 铁律：原始错误对象只进 console（给自己排查），绝不拼进给用户看的文案。
+  function apiError(kind, message, status) {
+    var e = new Error(message || '');
+    e.kind = kind;
+    if (status) e.status = status;
+    return e;
+  }
+
+  function describeApiError(err) {
+    // ① 网络层：fetch 自己 reject 了，异常上不会有 kind 标记
+    if (!err || !err.kind) {
+      return '网络连不上服务器，请检查网络后重试（本地书单不受影响）';
+    }
+    // ② HTTP 层：有响应但不是 2xx，或者回来的根本不是 JSON（典型是网关的 HTML 报错页）
+    if (err.kind === 'http') {
+      return '服务器暂时没响应（HTTP ' + err.status + '），请稍后重试（本地书单不受影响）';
+    }
+    // ③ 业务层：后端的中文原样给用户，不套壳、不翻译
+    return err.message;
+  }
+
   function loadApiDemo() {
     fetch(API_DEMO_URL)
       .then(function (r) {
-        return r.json().then(function (body) { return { httpStatus: r.status, body: body }; });
+        // 先取文本而不是直接 r.json()：网关回错误页时是 HTML，
+        // r.json() 会抛「Unexpected token '<' ...」，既看不懂也指不出是谁的问题。
+        return r.text().then(function (text) {
+          return { httpStatus: r.status, text: text };
+        });
       })
       .then(function (res) {
-        // 契约 1.2：成败只看 ok 字段；失败时 error 是给人看的中文
-        if (!res.body || res.body.ok !== true) {
-          throw new Error((res.body && res.body.error) || ('HTTP ' + res.httpStatus));
+        if (res.httpStatus < 200 || res.httpStatus >= 300) {
+          throw apiError('http', '', res.httpStatus);
         }
-        renderApiDemoTable(res.body.data.books || []);
+        var body;
+        try {
+          body = JSON.parse(res.text);
+        } catch (e) {
+          throw apiError('http', '', res.httpStatus); // 回了非 JSON，同样归 HTTP 层
+        }
+        // 契约 1.2：成败只看 ok 字段；失败时 error 是给人看的中文
+        if (!body || body.ok !== true) {
+          throw apiError('biz', (body && body.error) || '接口拒绝了这次请求');
+        }
+        renderApiDemoTable((body.data && body.data.books) || []);
       })
       .catch(function (err) {
-        setStatus('接口暂时读不到：' + err.message + '（本地书单不受影响）', true);
+        // 原始错误只给开发者看，用户只看到人话
+        if (window.console && window.console.error) {
+          window.console.error('[api-demo] 原始错误（只给自己排查用）：', err);
+        }
+        setStatus(describeApiError(err), true);
       });
   }
 

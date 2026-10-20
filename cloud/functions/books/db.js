@@ -30,8 +30,15 @@
 const REQUEST_TIMEOUT_MS = 8000;
 
 // 读：查 books 表，按创建时间倒序。limit 不传 = 返回全部。
+// Day 23 余力（软删除）：只取 is_deleted = false 的行。
+// 被"删掉"的书仍然躺在表里（is_deleted = true），所以这里必须过滤，
+// 否则删过的书会重新出现在列表里 —— 那就等于没删。
 async function fetchBooks(limit, baseUrl, apiKey) {
-  const params = new URLSearchParams({ select: "*", order: "createdAt.desc" });
+  const params = new URLSearchParams({
+    select: "*",
+    order: "createdAt.desc",
+    is_deleted: "eq.false",
+  });
   if (limit !== undefined) params.set("limit", String(limit));
 
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
@@ -50,7 +57,11 @@ async function fetchBooks(limit, baseUrl, apiKey) {
 // 口径（大帅拍板）：书名+作者都相同（trim 后）即算重复，其他字段不管——
 // 同一本书补了封面再存也会被拒。
 async function findDuplicate(title, author, baseUrl, apiKey) {
-  const params = new URLSearchParams({ select: "id,title,author" });
+  // Day 23 余力：被软删的书不该挡住重新添加 —— 删过的书再添一遍是正常需求
+  const params = new URLSearchParams({
+    select: "id,title,author",
+    is_deleted: "eq.false",
+  });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -68,7 +79,12 @@ async function findDuplicate(title, author, baseUrl, apiKey) {
 // PATCH 之前必须先调它——「先确认这本书在不在」是今天的核心动作：
 // 不查就改，改到 0 行也会被当成成功，用户以为改了、其实什么都没发生。
 async function findBookById(id, baseUrl, apiKey) {
-  const params = new URLSearchParams({ select: "*", id: `eq.${id}` });
+  // Day 23 余力：软删掉的书在接口层看来等于"不存在"，PATCH 不该还能改它
+  const params = new URLSearchParams({
+    select: "*",
+    id: `eq.${id}`,
+    is_deleted: "eq.false",
+  });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
     signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
@@ -105,9 +121,12 @@ async function updateBook(id, patch, baseUrl, apiKey) {
 }
 
 // 删笔记（Day 22）：把某本书名下的笔记全部删掉，返回真实删掉的条数。
-// 契约 3.4 / PRD AC-10 要求删书时级联删笔记；schema.sql 里没建物理外键，
-// 所以这条级联关系只能靠代码保证——顺序必须是「先删笔记，再删书」。
-// 反过来先删书，笔记就成了找不到主人的孤儿数据，而且再也查不出该删哪些。
+// schema.sql 里没建物理外键，所以"删书连带删笔记"这条关系只能靠代码保证——
+// 顺序必须是「先删笔记，再删书」；反过来先删书，笔记就成了找不到主人的
+// 孤儿数据，而且再也查不出该删哪些。
+// ⚠️ Day 23 起本函数【不再被 /api/books/:id 调用】：DELETE 改成了软删除，
+//    笔记故意保留（书一恢复笔记也都在，见契约 3.4）。保留它是因为
+//    "彻底清理某本书及其笔记"迟早要用（清测试数据、真删账号），安全阀继续有效。
 async function deleteNotesByBookId(bookId, baseUrl, apiKey) {
   // ⚠️ 最后一道保险：没有 bookId 就不许发请求。
   // 条件为空 = 匹配整张笔记表，这一下会把所有书的笔记全删掉。
@@ -129,8 +148,37 @@ async function deleteNotesByBookId(bookId, baseUrl, apiKey) {
   return rows.length; // 真实影响行数，不是猜的
 }
 
-// 删书（Day 22）：按 id 精确删一行，返回真实删掉的行数（0 = 什么都没删到）。
-// 同样带 id 空值保险——删除接口一旦让空条件溜到数据库，就是整表清空。
+// 软删除（Day 23 余力）：把 is_deleted 置为 true，行还在表里，删错了能捞回来。
+// 为什么是 UPDATE 而不是 DELETE：DELETE 一走，书和它的阅读记录就真的没了，
+// 接口层没有任何撤销手段；is_deleted 留个标记，一句 SQL 就能还原。
+// 和硬删一样只认真实影响行数：0 行 = 没删到（可能本来就删过了），不能报成功。
+// ⚠️ 条件里带 is_deleted=eq.false 有两层用处：
+//    ① 对同一本书重复删除，第二次会返回 0 行，接口能如实报"这本书不存在"
+//    ② 条件里永远同时有 id 和 is_deleted，绝不会退化成"无条件的整表更新"
+async function softDeleteBook(id, baseUrl, apiKey) {
+  if (!id) throw new Error("softDeleteBook 缺少 id，已中止");
+
+  const params = new URLSearchParams({ id: `eq.${id}`, is_deleted: "eq.false" });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation", // 回来的行数才是真的
+    },
+    body: JSON.stringify({ is_deleted: true }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    throw new Error(`数据源返回 HTTP ${resp.status}`);
+  }
+  const rows = await resp.json();
+  return rows.length;
+}
+
+// 硬删（Day 22）：按 id 精确删一行，返回真实删掉的行数（0 = 什么都没删到）。
+// Day 23 余力起，/api/books/:id 的 DELETE 改走 softDeleteBook，这里不再被接口调用；
+// 保留它是因为"彻底清理"迟早要用（比如清测试数据），底层的 id 空值保险继续有效。
 async function deleteBook(id, baseUrl, apiKey) {
   if (!id) throw new Error("deleteBook 缺少 id，已中止");
 
@@ -174,5 +222,6 @@ module.exports = {
   updateBook,
   insertBook,
   deleteNotesByBookId,
+  softDeleteBook,
   deleteBook,
 };

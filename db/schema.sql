@@ -9,8 +9,9 @@
 -- 能否重复跑：能。CREATE TABLE / CREATE INDEX 都带 IF NOT EXISTS，已存在就跳过。
 -- 执行顺序：先本文件（建表），再 seed.sql（灌数据）。
 -- 两表关联：notes.bookId → books.id（一条笔记属于一本书，多对一）。
--- 设计说明：不建物理外键（FOREIGN KEY），关联正确性由 Day 17 的
---   接口逻辑保证（删书时先删该书笔记再删书，与 PRD AC-10 级联删除一致）。
+-- 设计说明：不建物理外键（FOREIGN KEY），关联正确性由接口逻辑保证。
+--   Day 23 起删书改为「软删除」（books.is_deleted 打标记），
+--   笔记不再跟随删除、故意保留，删错的书只要把标记改回 false 就能连笔记一起回来。
 -- ⚠️ PostgreSQL 铁律：带大写字母的列名（coverUrl / totalPages 等）必须用
 --   双引号包住，不加引号 PG 会悄悄把它们转成全小写。本文件已处理好，照贴即可。
 -- ============================================================
@@ -27,6 +28,7 @@ CREATE TABLE IF NOT EXISTS books (
   "startedAt"   VARCHAR(40)  NULL,
   "finishedAt"  VARCHAR(40)  NULL,
   "createdAt"   VARCHAR(40)  NOT NULL,
+  "is_deleted"  BOOLEAN      NOT NULL DEFAULT FALSE,
   PRIMARY KEY ("id")
 );
 
@@ -42,6 +44,7 @@ COMMENT ON COLUMN books."currentPage" IS '当前读到第几页，未填为 NULL
 COMMENT ON COLUMN books."startedAt" IS '转入「在读」时的时间戳。存 ISO 8601 字符串（契约 1.3），接口查出来直接返回，不用做时区/格式转换';
 COMMENT ON COLUMN books."finishedAt" IS '转入「已读」时的时间戳，同上';
 COMMENT ON COLUMN books."createdAt" IS '创建时间，ISO 8601 字符串。书单列表按它倒序（契约 3.1）';
+COMMENT ON COLUMN books."is_deleted" IS '软删除标记（Day 23 余力）。false = 正常，true = 已被"删除"但行还在表里。接口查列表/查单本/查重都会带 is_deleted = false 过滤，所以被软删的书对外等于不存在；要找回只需把它改回 false。';
 
 -- ---------- 表 2：notes（读书笔记表，一条笔记一行） ----------
 CREATE TABLE IF NOT EXISTS notes (

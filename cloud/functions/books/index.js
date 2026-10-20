@@ -63,11 +63,45 @@ function fail(res, message) {
   send(res, { ok: false, error: message });
 }
 
+// ---------- Day 23：把底层异常翻成人话 ----------
+// 改之前这里是 `fail(res, "数据源暂时不可用：" + err.message)`，
+// 用户可能拿到的是 "数据源暂时不可用：fetch failed"、
+// "数据源暂时不可用：terminated" —— 英文、内部术语、看不出该怎么办。
+// 改之后只分三种说法，各自指向一个不同的动作：
+//   ① 超时        → 数据源慢，等一下再试
+//   ② 对端回错误码 → 服务器那边病了，把 HTTP 码留下来方便对截图说话
+//   ③ 连不上      → DNS/拒绝连接/连接被重置，同属"再试"，但措辞分开免得误导
+// 铁律：原始异常只进 log()（站长排查用），绝不拼进返回体（用户看的）。
+function describeError(err) {
+  if (err && err.name === "TimeoutError") {
+    return "数据源响应超时，请稍后重试";
+  }
+  const msg = (err && err.message) || "";
+  const http = /HTTP\s+(\d{3})/.exec(msg);
+  if (http) {
+    return `数据源暂时不可用（HTTP ${http[1]}），请稍后重试`;
+  }
+  if (/fetch failed|ECONNREFUSED|ECONNRESET|ENOTFOUND|EAI_AGAIN|socket hang up|terminated/i.test(msg)) {
+    return "连不上数据源，请稍后重试";
+  }
+  return "数据源暂时不可用，请稍后重试";
+}
+
 // 余力加练（Day 18）：每次请求留一行服务端日志。
 // 部署后在控制台「函数 → 日志」里能看到，以后排查「用户说接口不对」时
 // 先看这里：请求到底进没进来、走到了哪个分支。
+//
+// 余力加练（Day 23）：补上时间。清单要求日志含「时间、路径、结果」三样，
+// 原来只有后两样。
+// ⚠️ 为什么要手动 +8 小时：云函数容器默认时区是 UTC，直接 new Date() 打出来
+//    会比北京时间少 8 小时，排查时容易把「刚发生的请求」看成「一小时前的」。
+//    这里不依赖容器时区，自己换算，日志行尾标 +08 表明是北京时间。
+function beijingTime() {
+  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
 function log(method, path, result, extra) {
-  const line = `[books] ${method} ${path} -> ${result}${extra ? " | " + extra : ""}`;
+  const line = `[books] ${beijingTime()} +08 ${method} ${path} -> ${result}${extra ? " | " + extra : ""}`;
   console.log(line);
 }
 
@@ -319,9 +353,8 @@ async function handlePatch(req, res, id, baseUrl, apiKey) {
     // 契约 3.3：返回改后的完整对象
     send(res, { ok: true, data: { book: updated } });
   } catch (err) {
-    const why = err.name === "TimeoutError" ? "请求超时" : err.message;
-    fail(res, `数据源暂时不可用：${why}`);
-    log("PATCH", `/api/books/${id}`, "500", why);
+    log("PATCH", `/api/books/${id}`, "500", err.message);
+    fail(res, describeError(err));
   }
 }
 
@@ -333,11 +366,14 @@ async function handlePatch(req, res, id, baseUrl, apiKey) {
 // DELETE /api/books/:id 的处理体。
 // 今天要掌握的问题——「删除为什么比新增更容易出事」——答案就在这个函数的顺序里：
 //   新增是加法，错了最多多一条垃圾数据，删掉就行；
-//   删除是减法，错了数据就没了，接口层没有任何撤销手段。
+//   删除是减法，错了数据就没了。
 // 所以删除这条路必须比新增更保守，本函数做了三层：
 //   ① 先确认真实存在（不盲删）
 //   ② 只按 id 精确删（id 为空就停，绝不发空条件请求）
 //   ③ 只认数据源回来的真实影响行数（0 行就是失败，不谎报成功）
+// Day 23 余力补了一条：第 ② 层从「物理删行」换成「打 is_deleted 标记」。
+//   原文写的"接口层没有任何撤销手段"到此为止不再成立 —— 现在撤得回来，
+//   一句 UPDATE books SET is_deleted = false WHERE id = '...' 就能还原。
 async function handleDelete(req, res, id, baseUrl, apiKey) {
   if (!apiKey) {
     fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
@@ -355,16 +391,18 @@ async function handleDelete(req, res, id, baseUrl, apiKey) {
       return;
     }
 
-    // ② 级联顺序不能反：先删笔记，再删书。
-    //    先删书的话，笔记的 bookId 就指向了一条不存在的记录，
-    //    既成了孤儿数据，也没法再靠 bookId 找回该删哪些。
-    const deletedNotes = await db.deleteNotesByBookId(id, baseUrl, apiKey);
-    const deletedBooks = await db.deleteBook(id, baseUrl, apiKey);
+    // ② Day 23 余力：从「物理删除」改成「软删除」——
+    //    只给这本书打一个 is_deleted 标记，行还躺在表里，删错了捞得回来。
+    //    笔记【故意保留】：以后恢复时笔记也跟着回来，这才是"删错可找回"的完整形态。
+    //    ⚠️ 这也是与 Day 22 的唯一分歧点：Day 22 是「先删笔记再删书」，
+    //    现在笔记不删了。契约 3.4 的措辞要不要跟着改，等大帅拍板（见 journal 待办）。
+    const softDeleted = await db.softDeleteBook(id, baseUrl, apiKey);
 
-    // ③ 数据源说删了 0 行 = 没删到，就不能回成功。
-    if (deletedBooks === 0) {
+    // ③ 数据源说影响 0 行 = 没删到，就不能回成功
+    //    （软删的条件里带了 is_deleted = false，所以重复删除会走到这里）
+    if (softDeleted === 0) {
       fail(res, "这本书不存在，可能已被删除");
-      log("DELETE", `/api/books/${id}`, "404", "删除影响 0 行");
+      log("DELETE", `/api/books/${id}`, "404", "软删除影响 0 行");
       return;
     }
 
@@ -372,14 +410,14 @@ async function handleDelete(req, res, id, baseUrl, apiKey) {
       "DELETE",
       `/api/books/${id}`,
       "200",
-      `删《${current.title}》，书 ${deletedBooks} 行、笔记 ${deletedNotes} 条`
+      `软删《${current.title}》，影响 ${softDeleted} 行，笔记保留`
     );
-    // 契约 3.4：返回真实删除数量
-    send(res, { ok: true, data: { deletedBooks, deletedNotes } });
+    // 契约 3.4 的形状保持兼容：仍回 deletedBooks / deletedNotes，
+    // 只是 deletedNotes 现在恒为 0（笔记不删），另加一个 softDeleted 说明用的是软删
+    send(res, { ok: true, data: { deletedBooks: softDeleted, deletedNotes: 0, softDeleted: true } });
   } catch (err) {
-    const why = err.name === "TimeoutError" ? "请求超时" : err.message;
-    fail(res, `删除失败，数据源暂时不可用：${why}`);
-    log("DELETE", `/api/books/${id}`, "500", why);
+    log("DELETE", `/api/books/${id}`, "500", err.message);
+    fail(res, `删除失败：${describeError(err)}`);
   }
 }
 
@@ -409,9 +447,9 @@ const server = http.createServer((req, res) => {
         send(res, { ok: true, data: { books: rows } });
       })
       .catch((err) => {
-        const why = err.name === "TimeoutError" ? "请求超时" : err.message;
-        log("GET", "/api/books", "500", why);
-        fail(res, `数据源暂时不可用：${why}`);
+        // Day 23：原始异常只进日志，用户只看人话
+        log("GET", "/api/books", "500", err.message);
+        fail(res, describeError(err));
       });
     return;
   }
@@ -468,15 +506,13 @@ const server = http.createServer((req, res) => {
                 send(res, { ok: true, data: { book } });
               })
               .catch((err) => {
-                const why = err.name === "TimeoutError" ? "请求超时" : err.message;
-                fail(res, `写入失败，数据源暂时不可用：${why}`);
-                log("POST", "/api/books", "500", why);
+                log("POST", "/api/books", "500", err.message);
+                fail(res, `写入失败：${describeError(err)}`);
               });
           })
           .catch((err) => {
-            const why = err.name === "TimeoutError" ? "请求超时" : err.message;
-            fail(res, `数据源暂时不可用：${why}`);
-            log("POST", "/api/books", "500", why);
+            log("POST", "/api/books", "500", err.message);
+            fail(res, describeError(err));
           });
       })
       .catch((err) => {
