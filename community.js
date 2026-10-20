@@ -2490,6 +2490,9 @@
   // Day 20 余力加练：检查台的「最后更新时间」。只在成功抓取后更新，
   // 失败时保留上一次的成功时间；存模块变量是为了切走再切回来不丢。
   var apiDemoLastUpdated = '';
+  // Day 24：上一次成功抓取的「时分秒」（只要时刻，不要日期——同一天内够用）。
+  // 失败时用它告诉用户：你现在看到的这屏数据是几点抓的。
+  var apiDemoLastOkClock = '';
 
   function setApiDemoUpdated() {
     apiDemoLastUpdated = '最后更新：' + new Date().toLocaleString();
@@ -2541,6 +2544,39 @@
     return err.message;
   }
 
+  /* ===== Day 24 修复：刷新失败时，别让上一轮的数据「假装」是新的 =====
+   *
+   * 改之前：失败分支只调 setStatus()，状态栏变红，但 #api-demo-table 里
+   *   上一轮渲染的 <table> 原样留着 → 一屏之内同时说着「读不到」和摆着 5 本书，
+   *   用户完全没法判断这数据是刚抓的还是三天前的。
+   *   （复现路径、排除法、A/B 对照实验见 journal/Day-24.md）
+   *
+   * 改之后分两种情况，靠「DOM 里到底有没有 <table>」判断，不看内部变量：
+   *   ① 没有旧数据 → 维持原样：只报错，没什么可标记的
+   *   ② 有旧数据   → 保留数据（它本身有价值，不该因为一次刷新失败就抹掉），
+   *                  但必须一眼看出它是旧的：状态栏写明「上次 HH:MM:SS 抓到」，
+   *                  表格整体降到 45% 不透明度当视觉上的"过期"标记。
+   *
+   * 为什么用 DOM 判断而不是内部变量：渲染结果才是事实。变量可能因为别的代码
+   *   路径不同步，而 DOM 里有 <table> 就代表用户此刻真能在屏幕上看到数据。
+   *
+   * 为什么不加新 CSS：只用内联 opacity + 已有的 .is-error 样式，改动面最小、
+   *   回滚只要还原这一个函数和它的调用点。
+   */
+  function markApiDemoStale(reason) {
+    var t = byId('api-demo-table');
+    var hasData = !!(t && t.querySelector && t.querySelector('table'));
+
+    if (!hasData) {
+      setStatus(reason, true); // 屏幕本来就是空的，不需要提醒"这是旧的"
+      return;
+    }
+
+    var clock = apiDemoLastOkClock || '更早';
+    t.style.opacity = '0.45'; // 视觉标记：整张表灰下去
+    setStatus(reason + '｜下面显示的是上次 ' + clock + ' 抓到的旧数据，可能已过期', true);
+  }
+
   function loadApiDemo() {
     fetch(API_DEMO_URL)
       .then(function (r) {
@@ -2571,14 +2607,23 @@
         if (window.console && window.console.error) {
           window.console.error('[api-demo] 原始错误（只给自己排查用）：', err);
         }
-        setStatus(describeApiError(err), true);
+        // Day 24 修复：这里原来是 setStatus(describeApiError(err), true);
+        // 只改状态栏、没碰表格，于是上一轮的数据继续留在屏幕上冒充新数据。
+        // 现在统一走 markApiDemoStale：没旧数据就只报错，有旧数据就报错 + 标记过期。
+        markApiDemoStale(describeApiError(err));
       });
   }
 
   function renderApiDemoTable(books) {
     var t = byId('api-demo-table');
     if (!t) return;
-    setStatus('真库返回 ' + books.length + ' 本书 · ' + new Date().toLocaleTimeString() + ' 抓取', false);
+    // Day 24：成功抓到数据 → 把"过期"标记撤掉（半透明复位），
+    // 否则上一次失败留下的灰底会一直挂着，刚抓到的数据看着像旧的。
+    if (t.style) t.style.opacity = '';
+    // Day 24：记下这次成功的时刻，供下次失败时告诉用户"这屏数据是几点抓的"
+    var clock = new Date().toLocaleTimeString();
+    apiDemoLastOkClock = clock;
+    setStatus('真库返回 ' + books.length + ' 本书 · ' + clock + ' 抓取', false);
     setApiDemoUpdated(); // Day 20 余力：成功抓取才刷新「最后更新时间」
 
     if (!books.length) {
