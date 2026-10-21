@@ -124,6 +124,21 @@ function sha256NoCR(buf) {
   return crypto.createHash("sha256").update(buf.toString("binary").replace(/\r/g, ""), "binary").digest("hex");
 }
 
+/**
+ * 去掉 \r 之后的字节长度。
+ *
+ * ⚠ 为什么需要这个（2026-10-21 Day 26 踩到）：第 4 条原先用「原始字节数相等」+
+ *   「去 CR 后哈希相等」两个条件，两个口径不一致 —— 本地工作区是 CRLF（core.autocrlf=true），
+ *   线上是 LF，于是字节数必然差「行数」那么多（index.html 差 942 = 942 行），
+ *   哈希明明相同却因为字节数先卡住而判 FAIL。
+ *   证据：那天一个前端文件字都没改，回滚演练后复跑，第 4 条照样报红，
+ *   报出「本地 120448 / 线上 117465（差 -2983）」，而 2983 正好是该文件的行数。
+ *   现在字节数与哈希统一走「去 CR」口径，行尾差异不再误报。
+ */
+function lenNoCR(buf) {
+  return buf.toString("binary").replace(/\r/g, "").length;
+}
+
 /** 跑一次 curl，返回状态码与落盘字节数 */
 function curlFile(url, dest) {
   const r = run("curl", [
@@ -306,11 +321,16 @@ function check4_static() {
       broken.push(`${name}（线上 HTTP ${got.status}）`);
       continue;
     }
-    if (got.bytes === localBuf.length && sha256NoCR(got.buf) === sha256NoCR(localBuf)) {
+    // 字节数与哈希必须同口径：都按「去 CR 后」比。
+    // 只比原始字节数会把 CRLF/LF 差异误判成「静态托管没上传新版」（Day 26 真实误报过）。
+    const lb = lenNoCR(localBuf);
+    const rb = lenNoCR(got.buf);
+    if (lb === rb && sha256NoCR(got.buf) === sha256NoCR(localBuf)) {
       same.push(name);
     } else {
-      const delta = got.bytes - localBuf.length;
-      diff.push(`${name} 本地 ${localBuf.length} / 线上 ${got.bytes}（差 ${delta > 0 ? "+" : ""}${delta} 字节）`);
+      const delta = rb - lb;
+      const note = got.buf.length !== rb || localBuf.length !== lb ? "，含行尾差异" : "";
+      diff.push(`${name} 本地 ${lb} / 线上 ${rb}（差 ${delta > 0 ? "+" : ""}${delta} 字节${note}）`);
     }
   }
 
@@ -323,10 +343,11 @@ function check4_static() {
       evidence: `本地与线上不一致 ${diff.length}/${CFG.staticFiles.length}：${diff.join("；")} → 静态托管没上传新版`,
     };
   }
-  const total = CFG.staticFiles.reduce((s, f) => s + fs.statSync(path.join(ROOT, f)).size, 0);
+  // 统计口径同样用「去 CR」的长度，与上面的比较保持一致
+  const total = CFG.staticFiles.reduce((s, f) => s + lenNoCR(fs.readFileSync(path.join(ROOT, f))), 0);
   return {
     status: "PASS",
-    evidence: `${same.length}/${CFG.staticFiles.length} 个文件字节与哈希全等，合计 ${total} 字节`,
+    evidence: `${same.length}/${CFG.staticFiles.length} 个文件字节与哈希全等（去 CR 口径），合计 ${total} 字节`,
   };
 }
 
