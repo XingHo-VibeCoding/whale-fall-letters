@@ -54,7 +54,12 @@
 | Day 9 | 前端设计审查 —— 对比度、间距、焦点态，修 5 处样式问题 | 已完成 |
 | Day 10 | 部署上线 —— 开启 GitHub Pages，网站可在手机 / 他人设备打开 | 已完成 |
 | Day 11 | 多用户社区前端 —— 账号 / 论坛 / 热门 / 私信 / 个人主页（界面 + mock 数据） | 已完成 |
-| Day 23 | 接入后端与数据库（`.env` 届时才会用到） | 未开始 |
+| Day 12 | 创建并调用 Skill，完成书单筛选交互自检（`skills/filter-interaction-check/`） | 已完成 |
+| Day 13–21 | 第 2–3 周：云函数 + PostgreSQL 接入（`cloud/`、`db/`）、接口契约、整站视觉改版「星海鲸落」、周验收 | 已完成 |
+| Day 22 | `PATCH` / `DELETE` 接口上线，增删改查闭环打通 | 已完成 |
+| Day 23 | 密钥排查、错误提示改成人话、软删除（删错的书可以找回） | 已完成 |
+| Day 24 | 修复检查台刷新失败后旧数据冒充新数据 | 已完成 |
+| Day 25 | 发布前检查 Skill —— 九条自动检查 + 反向验证，见 [`docs/skill-runs/`](docs/skill-runs/) | 已完成 |
 
 每日的完成情况记录在 [`journal/`](journal/) 目录下。
 
@@ -102,6 +107,30 @@ python -m http.server 8000
 
 > 提示：本地的数据库文件、环境配置不会进仓库，已被 `.gitignore` 挡住。
 
+## 发布前检查
+
+准备推上线、或者要把链接发给别人之前，先跑一遍：
+
+```bash
+node skills/pre-release-check/scripts/preflight.js
+```
+
+九条自动检查：密钥有没有进仓库、`.env` 有没有被正确忽略、GitHub Pages 能不能打开、**静态托管和本地文件是否一致**、接口是否活着、数据库迁移和代码是否对齐、有没有临时文件混进仓库、是否已全部推送、有没有引外部 CDN。另外两条必须人眼看的（手机宽度观感、键盘操作）**单独列、不算通过**。
+
+```bash
+node skills/pre-release-check/scripts/preflight.js --only 1,4      # 只跑指定几条
+node skills/pre-release-check/scripts/preflight.js --md docs/skill-runs/xxx.md   # 顺便写一份报告
+```
+
+退出码：`0` 全过、`1` 有未通过、`2` 脚本自己崩了（不是项目的问题）。**有红项就不许发。**
+
+两个容易忘的前提：
+
+- **静态托管是手动上传的**，`git push` 不会更新它 —— 所以第 4 条查的是静态托管，不是 Pages。
+- 脚本会先看工作区干不干净，自动判 **DRAFT**（还没提交，第 8 条必然红，属预期）还是 **FINAL**（干净，这才是真的发布前状态）。
+
+它只检查、不修东西 —— 红了先报告，确认后再动手。完整的九条清单、判定规则和踩过的坑见 [`skills/pre-release-check/SKILL.md`](skills/pre-release-check/SKILL.md)。
+
 ## 目录结构
 
 ```
@@ -123,11 +152,23 @@ whale-fall-letters/
 │   ├── PRD.md          # 产品需求文档（Day 4）：记录三功能 + 23 条验收标准
 │   ├── TECH_DESIGN.md  # 技术设计（Day 5）：技术路线、数据格式、目录结论
 │   ├── COMMUNITY_DESIGN.md  # 社区升级设计（Day 11）：账号 / 论坛 / 热门 / 私信 / 审核
+│   ├── api-contract.md # 接口契约（第 3 周起前后端唯一仲裁物，字段分歧以它为准）
+│   ├── skill-runs/     # Skill 每次调用的结果记录（Day 12、Day 25…）
 │   └── data-flow.svg   # 数据流图（Day 5）
+├── cloud/              # 云函数（Day 15 起）
+│   └── functions/
+│       ├── health/     # 健康检查：证明代码能部署上去、公网能访问
+│       └── books/      # 书籍接口：index.js 管路由校验，db.js 只管和数据库说话
+├── db/                 # PostgreSQL：建表、种子数据、迁移 SQL
+├── skills/             # 我写给自己的检查 Skill（改了什么就跑对应的那个）
+│   ├── filter-interaction-check/  # 书单筛选交互自检（Day 12）
+│   └── pre-release-check/         # 发布前检查（Day 25）
 └── journal/            # 每日学习打卡日志
-    ├── Day-02.md ~ Day-11.md
+    ├── Day-02.md ~ Day-24.md
     └── assets/         # 每日打卡用的截图
 ```
+
+> `journal/` 里 Day 11–21 的日志没建 —— 那几天的提交都在，只是没补打卡记录。
 
 > 截图没有逐个列出来 —— 它会随每天打卡不断变长，这里只说明放哪儿。
 
