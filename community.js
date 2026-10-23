@@ -1528,7 +1528,16 @@
         e.stopPropagation();
         if (hoverTip && tipAnchor === authorEl) { hideTip(); return; }
         showTip(authorEl, buildAuthorTip(authorEl.textContent));
+        return;
       }
+
+      /* Day 27 · 补「点别处就关」。
+         原来只有「再点回同一个书名/作者」才收起浮层；点进度区、笔记区、空白
+         一律不动，于是误触一下作者名，那行「暂无这位作者的资料」就永久悬在
+         页面中间压住内容（第三方试用反馈原话：「抢戏了」）。
+         这里放在三个分支之后：凡不是书名、不是作者、不是封面、也不在浮层内部
+         的点击，都把浮层收掉。不拦冒泡，其它点击行为照旧。 */
+      if (hoverTip && !t.closest('.hover-tip')) hideTip();
     }, true);
   }
 
@@ -2703,7 +2712,7 @@
   /* 进化表：min = 需要书数，scale = 体型，gears = 已解锁装备 */
   var GUARD_STAGES = [
     { min: 0,  key: 'sleep', name: '沉睡',                scale: 0.4,  gears: [],
-      copy: '每收藏一本书，它就长大一点。第一本书会唤醒它。' },
+      copy: '每多一本书，它就长大一点。第一本书会唤醒它。' },
     { min: 1,  key: 'baby',  name: '苏醒 · 幼鲸',          scale: 0.42, gears: [],
       copy: '书架有了第一本书，它开始游动。' },
     { min: 3,  key: 'grow',  name: '成长',                scale: 0.56, gears: ['trail'],

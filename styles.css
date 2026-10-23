@@ -1202,3 +1202,22 @@ body.opening-shake { animation: shake .45s ease-out 3.62s 1; }
   .cx-grid { grid-template-columns: repeat(3, 1fr); }
   .quote { flex-direction: column; align-items: flex-start; gap: 10px; }
 }
+
+/* ------------------------------------------------- 6 深色模式下的表单控件
+   Day 27 · 修「输入框白底浅字」（第三方试用反馈原话：「框里太淡了」）
+
+   现象：安卓 Chrome / 微信内置浏览器在系统深色模式下，阅读进度的数字输入框
+        变成白底，里面的数字却仍是浅色的 --ink，几乎看不见。
+   原因：全站此前没有任何 color-scheme 声明。浏览器读不到作者对深浅色的意图，
+        就按「页面是浅色」处理表单控件，把原生背景刷成白色；而文字颜色是我们
+        自己写的浅色，于是白底浅字。这是移动端专属故障，电脑上永远复现不出来。
+   修法：① 声明 color-scheme: dark —— 浏览器改为按深色渲染原生控件，不再自动反色；
+        ② 背景改成不透明色兜底（原来的 rgba(...,.6) 在部分渲染路径下会被当成未设置）。
+
+   改动只涉及颜色，不动任何布局数值。 */
+:root { color-scheme: dark; }
+
+input, textarea, select {
+  background-color: #0d1430;   /* 不透明底，替代原来的 rgba(8,14,40,.6) */
+  background-image: none;
+}
