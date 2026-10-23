@@ -1203,21 +1203,34 @@ body.opening-shake { animation: shake .45s ease-out 3.62s 1; }
   .quote { flex-direction: column; align-items: flex-start; gap: 10px; }
 }
 
-/* ------------------------------------------------- 6 深色模式下的表单控件
+/* ------------------------------------------------- 6 深色主题下的表单控件
    Day 27 · 修「输入框白底浅字」（第三方试用反馈原话：「框里太淡了」）
 
-   现象：安卓 Chrome / 微信内置浏览器在系统深色模式下，阅读进度的数字输入框
-        变成白底，里面的数字却仍是浅色的 --ink，几乎看不见。
-   原因：全站此前没有任何 color-scheme 声明。浏览器读不到作者对深浅色的意图，
-        就按「页面是浅色」处理表单控件，把原生背景刷成白色；而文字颜色是我们
-        自己写的浅色，于是白底浅字。这是移动端专属故障，电脑上永远复现不出来。
-   修法：① 声明 color-scheme: dark —— 浏览器改为按深色渲染原生控件，不再自动反色；
-        ② 背景改成不透明色兜底（原来的 rgba(...,.6) 在部分渲染路径下会被当成未设置）。
+   现象：阅读进度的数字输入框是白底、字是浅色 --ink，里面填的数字几乎看不见。
 
-   改动只涉及颜色，不动任何布局数值。 */
+   真根因（跟设备无关，电脑上一样白 —— 起初误判成安卓深色模式，已更正）：
+     第 328 行那条早期写的规则
+         input[type="text"], input[type="number"], textarea { background: #fff; }
+     权重是 (0,1,1)；
+     而 Day 20 星海段想把它改成深底的规则用的是光秃秃的 input，权重只有 (0,0,1)，
+     选择器竞争输了 —— 所以 background 一直保留着 #fff 白色。
+     偏偏 color 两边算出来都是 var(--ink)（同一个浅色），看不出谁赢，
+     于是最终呈现是「白底 + 浅字」，而不是「深底 + 浅字」。
+
+   修法：把选择器写成与 328 行同等或更高的权重，深色底才覆盖得过去。
+     这里不能只用 input 了事，必须写成 input[type="..."] 这种带属性的形式。
+
+   附带保留 color-scheme: dark：它不是本 bug 的元凶，但能让浏览器把滚动条、
+   下拉框等原生控件也按深色渲染，和整页统一。 */
+
 :root { color-scheme: dark; }
 
-input, textarea, select {
-  background-color: #0d1430;   /* 不透明底，替代原来的 rgba(8,14,40,.6) */
+input[type="text"],
+input[type="number"],
+input:not([type]),
+textarea,
+select {
+  background-color: #0d1430;   /* 不透明深底，覆盖 328 行的 #fff */
   background-image: none;
+  color: var(--ink);
 }
