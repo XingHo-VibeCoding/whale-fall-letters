@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>同步失败提示条 · 预览（用真 styles.css）</title>
+<!-- 直接引仓库里的真样式，不是复制的副本，所以看到的就是线上那个样子 -->
+<link rel="stylesheet" href="../styles.css">
+<style>
+  /* 只为本预览页服务的排版，不进仓库 */
+  .preview-wrap { max-width: 420px; margin: 0 auto; padding: 20px 16px 120px; }
+  .preview-h { font-size: 15px; font-weight: 500; margin: 26px 0 8px; color: var(--ink); }
+  .preview-note { font-size: 12px; color: var(--ink-soft); line-height: 1.7; margin: 0 0 12px; }
+  .demo-btn {
+    display: inline-block; margin: 6px 8px 6px 0; padding: 8px 14px;
+    border: 1px solid var(--accent); border-radius: var(--radius);
+    background: var(--card); color: var(--accent); font: inherit; cursor: pointer;
+  }
+  .phone-frame {
+    border: 1px solid var(--line); border-radius: 14px; background: var(--paper);
+    padding: 14px; margin-bottom: 10px;
+  }
+  /* 三条不同状态的条一起摆出来，方便一眼比对 */
+  .stack .sync-banner { position: static; transform: none; margin-bottom: 10px; max-width: none; }
+</style>
+</head>
+<body>
+
+<div class="preview-wrap">
+  <h1 style="font-size:15px;font-weight:500;color:var(--ink)">同步失败提示条 · 预览</h1>
+  <p class="preview-note">
+    这一页引的是 <code>whale-fall-letters/styles.css</code> 本体，所以颜色、圆角、字号就是线上那份。
+    下面是三种文案放在手机宽度里的样子；最后一块是**真的在页面底部**弹出来（点按钮试）。
+  </p>
+
+  <div class="preview-h">① 添加失败</div>
+  <div class="stack">
+    <div class="sync-banner" role="status">
+      <span class="sync-banner-text">「添加《云边有个小卖部》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试</span>
+      <button type="button" class="sync-banner-close">知道了</button>
+    </div>
+  </div>
+
+  <div class="preview-h">② 修改失败（文案短一些）</div>
+  <div class="stack">
+    <div class="sync-banner" role="status">
+      <span class="sync-banner-text">「修改」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试</span>
+      <button type="button" class="sync-banner-close">知道了</button>
+    </div>
+  </div>
+
+  <div class="preview-h">③ 删除失败</div>
+  <div class="stack">
+    <div class="sync-banner" role="status">
+      <span class="sync-banner-text">「删除」没同步到云端，已恢复原样：服务器返回 502，请稍后重试</span>
+      <button type="button" class="sync-banner-close">知道了</button>
+    </div>
+  </div>
+
+  <div class="preview-h">④ 真的在底部弹出来</div>
+  <p class="preview-note">点下面的按钮，条会固定在页面底部居中，12 秒自己收起；点「知道了」也能收。</p>
+  <div class="phone-frame">
+    <button type="button" class="demo-btn" id="btn-show">弹一条试试</button>
+    <button type="button" class="demo-btn" id="btn-show-long">弹一条很长的（书名很长的极端情况）</button>
+  </div>
+  <p class="preview-note">
+    ⚠️ 这一页只证明「样式和文案长这样」。<strong>真机效果还得你自己在手机上看一眼</strong>：
+    会不会挡住底部导航、圆角和你现在的页面搭不搭。
+  </p>
+</div>
+
+<!-- 下面这段只是让 ④ 能真弹出来，逻辑和 sync.js 里的 showSyncError 一致 -->
+<div class="sync-banner" id="live-banner" role="status" aria-live="polite" hidden>
+  <span class="sync-banner-text" id="live-text"></span>
+  <button type="button" class="sync-banner-close" id="live-close">知道了</button>
+</div>
+
+<script>
+  var liveBanner = document.getElementById('live-banner');
+  var liveText = document.getElementById('live-text');
+  var timer = null;
+
+  function show(msg) {
+    liveText.textContent = msg;
+    liveBanner.hidden = false;
+    if (timer) clearTimeout(timer);
+    timer = setTimeout(hide, 12000);
+  }
+  function hide() {
+    liveBanner.hidden = true;
+    if (timer) { clearTimeout(timer); timer = null; }
+  }
+
+  document.getElementById('live-close').addEventListener('click', hide);
+  document.getElementById('btn-show').addEventListener('click', function () {
+    show('「添加《三体》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
+  });
+  document.getElementById('btn-show-long').addEventListener('click', function () {
+    show('「添加《献给阿尔吉侬的花束（纪念版·全译注本）》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
+  });
+</script>
+
+</body>
+</html>

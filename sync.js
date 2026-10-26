@@ -642,10 +642,12 @@
 
     function report(err, what) {
       status.lastError = err;
+      var msg = '「' + what + '」没同步到云端，已恢复原样：' + describeApiError(err);
       try {
-        console.error('[sync] ' + what + ' 没同步到云端，本地已回滚：' +
-          describeApiError(err));
+        console.error('[sync] ' + msg);
       } catch (e) { /* console 不可用就算了 */ }
+      showSyncError(msg);              // 界面必须看得见，不能只有 console
+      refreshListIfVisible();          // 回滚后让列表跟本地数据对上
       if (typeof onError === 'function') {
         try { onError(err, what); } catch (e) { /* 回调自己炸了不该影响主流程 */ }
       }
@@ -705,6 +707,92 @@
     };
   }
 
+  /* --------------------------------------------- 失败提示（必须让人看见） */
+
+  /*
+   * 为什么非要有这个：
+   *   同步失败时 sync.js 会把本地改动回滚。如果界面一句话都不说，用户看到的是
+   *   「我明明点了保存，一刷新就没了」——这正是 PRD AC-23 要防的那类事：
+   *   **出错可以，装作没出错不行。**
+   *
+   * 为什么自己造一个条，不借用 app.js 的提示：
+   *   app.js 的 flashSaved() 只改按钮文字，而且它是在同步调用里发生的，
+   *   那时候还不知道云端成不成功（推送是之后的事）。所以要一条独立的条。
+   */
+
+  var bannerEl = null;
+  var bannerTextEl = null;
+  var bannerTimer = null;
+  var BANNER_MS = 12000;   // 12 秒后自动收起；也可以点「知道了」
+
+  function hasDom() {
+    return typeof document !== 'undefined' && document && document.body;
+  }
+
+  function ensureBanner() {
+    if (!hasDom()) return null;
+    if (bannerEl && bannerEl.parentNode) return bannerEl;
+
+    var el = document.createElement('div');
+    el.className = 'sync-banner';
+    el.setAttribute('role', 'status');       // 读屏能读出来，但不打断用户
+    el.setAttribute('aria-live', 'polite');
+    el.hidden = true;
+
+    var text = document.createElement('span');
+    text.className = 'sync-banner-text';
+
+    var btn = document.createElement('button');
+    btn.type = 'button';
+    btn.className = 'sync-banner-close';
+    btn.textContent = '知道了';
+    btn.addEventListener('click', hideSyncError);
+
+    el.appendChild(text);
+    el.appendChild(btn);
+    document.body.appendChild(el);
+
+    bannerEl = el;
+    bannerTextEl = text;
+    return el;
+  }
+
+  /**
+   * 弹一条同步失败提示。返回 true = 真的显示出来了；
+   * false = 没有 DOM（比如 Node 里跑测试），此时只有 console。
+   */
+  function showSyncError(message) {
+    var el = ensureBanner();
+    if (!el) return false;
+    if (bannerTextEl) bannerTextEl.textContent = message;
+    el.hidden = false;
+    if (bannerTimer) clearTimeout(bannerTimer);
+    bannerTimer = setTimeout(hideSyncError, BANNER_MS);
+    return true;
+  }
+
+  function hideSyncError() {
+    if (bannerEl) bannerEl.hidden = true;
+    if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
+    return true;
+  }
+
+  /**
+   * 回滚之后让界面跟本地数据对上。
+   *
+   * 只在书单页重渲染：别的页面（详情页）贸然重绘会打断用户，也会出现
+   * 「你正在看的这本书其实已经被撤掉了」这种更怪的场面。宁可让他自己刷新。
+   */
+  function refreshListIfVisible() {
+    try {
+      var h = (global.location && global.location.hash ? global.location.hash : '').replace(/^#/, '');
+      var isList = (h === '' || h === '/' || h === '/shelf');
+      if (isList && global.AppViews && typeof global.AppViews.enterList === 'function') {
+        global.AppViews.enterList();
+      }
+    } catch (e) { /* 重绘失败不该影响主流程 */ }
+  }
+
   /* -------------------------------------------------------------- 导出 */
 
   global.Sync = {
@@ -737,6 +825,9 @@
     pushAdd: pushAdd,
     pushUpdate: pushUpdate,
     pushDelete: pushDelete,
+
+    showSyncError: showSyncError,
+    hideSyncError: hideSyncError,
 
     describeApiError: describeApiError,
     API_BASE: API_BASE

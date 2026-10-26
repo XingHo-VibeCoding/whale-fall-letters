@@ -1234,3 +1234,53 @@ select {
   background-image: none;
   color: var(--ink);
 }
+
+/* ---------------------------------------------- 7 同步失败提示条（Day 29）
+   为什么要有：sync.js 推送失败会把本地改动回滚。界面如果不说话，用户看到的是
+   「我明明点了保存，一刷新就没了」——正是 AC-23 要防的那类事：出错可以，
+   装作没出错不行。
+   颜色用 --danger / --danger-bg：#b3261e 在 #fdecea 上按 WCAG 公式实算 5.71:1，
+   过 AA（4.5:1）。深色主题在 814 行那段重新定义了 --danger-bg，这里不用再管。
+   定位 fixed + 居中：不能挡住底部的导航栏，所以抬高到 18px 以上。 */
+.sync-banner {
+  position: fixed;
+  left: 50%;
+  bottom: 18px;
+  transform: translateX(-50%);
+  z-index: 90;
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  max-width: min(92vw, 460px);
+  padding: 10px 12px 10px 14px;
+  border: 1px solid var(--danger);
+  border-radius: var(--radius);
+  background: var(--danger-bg);
+  color: var(--ink);
+  font-size: 13px;
+  line-height: 1.5;
+  box-shadow: var(--shadow);
+}
+
+.sync-banner[hidden] { display: none; }
+
+.sync-banner-text { flex: 1; }
+
+.sync-banner-close {
+  flex: 0 0 auto;
+  padding: 4px 10px;
+  border: 1px solid var(--danger);
+  border-radius: 6px;
+  background: transparent;
+  color: var(--danger);
+  font: inherit;
+  cursor: pointer;
+}
+
+.sync-banner-close:hover { background: rgba(179, 38, 30, .08); }
+
+/* 键盘用户能看见焦点在哪（人工验收第 2 条就查这个） */
+.sync-banner-close:focus-visible {
+  outline: 2px solid var(--danger);
+  outline-offset: 2px;
+}
