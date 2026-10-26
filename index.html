@@ -933,8 +933,12 @@
      顺序也不能颠倒 —— store.js 必须先于 app.js。
      community.js 是 Day 11 新增的社区层（论坛/私信/登录），
      它要读到 app.js 暴露的视图切换能力，所以放在 app.js 之后。
+     sync.js（Day 29）是云端同步层：只依赖 store.js，所以紧跟其后。
+     ⚠️ 它默认关闭（enabled=false），**不会自动跑任何请求**；
+        要用必须在控制台手动 Sync.enable()。见 docs/PLAN-data-sync.md
      ============================================================ -->
 <script src="store.js"></script>
+<script src="sync.js"></script>
 <script src="app.js"></script>
 <script src="community.js"></script>
 

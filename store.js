@@ -131,6 +131,46 @@
   function readBooks() { return readList(KEY_BOOKS); }
   function readNotes() { return readList(KEY_NOTES); }
 
+  /**
+   * 用外部数据整体替换书单（Day 29 数据互通加）。
+   *
+   * 给谁用：sync.js 从云端拉到全量之后，要把结果写回本地缓存。
+   * ⚠️ 界面代码不要直接调——它会**覆盖**整份书单，没有任何确认。
+   *    （这就是为什么它放在 store.js 里：碰存储的地方只能有一个。）
+   *
+   * 为什么不在 sync.js 里直接写 localStorage：
+   *   store.js 第 9 行那条约定——界面代码永远不直接碰 localStorage。
+   *   同步层也算「不直接碰」，否则 Key 会散成两处，以后换存储方案要改两个文件。
+   *
+   * 返回 { ok:true, data:{ count } } 或 { ok:false, error }
+   */
+  function replaceBooks(list) {
+    if (Object.prototype.toString.call(list) !== '[object Array]') {
+      return fail('替换书单失败：需要传入数组');   // 防止手滑传 null 把书单清空
+    }
+    var written = writeList(KEY_BOOKS, list);
+    if (!written.ok) return written;
+    return ok({ count: list.length });
+  }
+
+  /**
+   * 用外部数据整体替换笔记（Day 29 数据互通加）。
+   *
+   * 给谁用：迁移时书的 id 会从「本地生成的 book_xxx」换成「云端生成的 book-mvpa…」，
+   * 笔记里的 bookId 如果不同步改，页面上就查不到它了——数据还在，但看不见。
+   * 那个现象比丢数据更吓人（用户会以为笔记没了）。
+   *
+   * ⚠️ 同 replaceBooks：整体覆盖，界面代码不要直接调。
+   */
+  function replaceNotes(list) {
+    if (Object.prototype.toString.call(list) !== '[object Array]') {
+      return fail('替换笔记失败：需要传入数组');
+    }
+    var written = writeList(KEY_NOTES, list);
+    if (!written.ok) return written;
+    return ok({ count: list.length });
+  }
+
   /* ------------------------------------------------------------ 书籍：校验 */
 
   /**
@@ -523,6 +563,10 @@
     updateBook: updateBook,
     deleteBook: deleteBook,
     countNotes: countNotes,
+
+    // 只给 sync.js 的同步层用（整体覆盖书单/笔记，无确认）。界面代码别调。
+    replaceBooks: replaceBooks,
+    replaceNotes: replaceNotes,
 
     addNote: addNote,
     listNotes: listNotes,
