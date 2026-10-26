@@ -145,13 +145,28 @@ node ../day26-verify/rollback-timer.js --to v1.0    # 等线上变回 v1.0
 
 ### 2.3 自证
 
-探针**必须走网关已映射的 `/api/books` 前缀**：
+探针**必须走网关已映射的 `/api/books` 前缀**（`/api/no-such-path` 测出来的是网关，不是函数）。
 
 ```bash
-curl -sS --ssl-no-revoke "https://reading-sea-d7gd8l7o78b7304ae.service.tcloudbase.com/api/books/book-001"
+BASE="https://reading-sea-d7gd8l7o78b7304ae.service.tcloudbase.com"
+
+# ① 函数活着没：返回 service 与当前时间即为活
+curl -sS --ssl-no-revoke "$BASE/api/health"
+
+# ② 函数到数据库通不通：返回 books 数组即为通
+curl -sS --ssl-no-revoke "$BASE/api/books"
+
+# ③ 是哪个版本：返回的每本书里有没有 is_deleted 字段
+#    有 = Day 23 之后的软删除新版；没有 = Day 23 之前
+curl -sS --ssl-no-revoke "$BASE/api/books" | grep -c '"is_deleted"'
 ```
 
-看返回文案判断版本（比如软删除新版会带 `softDeleted` 相关行为）。用 `/api/no-such-path` 测出来的是网关，不是函数。
+⚠️ **更正（Day 28 实测）**：以前这一节写的探针是 `GET /api/books/book-001`，**这条接口从未实现**，
+请求会返回 `{"ok":false,"error":"未知路径…"}` —— 看起来像「函数挂了」，其实只是这个路径不存在。
+**别再拿单本查询当探针**，用上面三条。返回里 `ok` 为 `false` 时看 `error` 文案：
+「未知路径」= 路由问题、「这本书不存在」= 查到了函数但数据不在。
+
+> 判断版本还有一招：软删除新版的删除返回里带 `softDeleted: true`，旧版是 `{deletedBooks, deletedNotes}` 没有这个字段。
 
 ---
 

@@ -71,11 +71,17 @@
 
 ### 在线版（手机也能开，发给别人就能用）
 
-项目已部署在 GitHub Pages（2026-09-30 开启），打开这个网址就能用——**手机、别人的电脑都可以**：
+两个地址都能打开，**同一份代码**。对外给链接、演示接口，用第一个：
 
-**<https://xingho-vibecoding.github.io/whale-fall-letters/>**
+| 用途 | 地址 |
+|---|---|
+| **主用**（国内快、接口能通） | **<https://reading-sea-d7gd8l7o78b7304ae-1385227197.tcloudbaseapp.com>** |
+| 备份（GitHub Pages，2026-09-30 开启） | <https://xingho-vibecoding.github.io/whale-fall-letters/> |
 
-> 注意：数据存在「打开页面的那台设备」自己的浏览器里。你手机上记的和电脑上记的**互不相通**，也看不到别人设备上的书。多人共用一份数据，要等后端接上（计划中）。
+> ⚠️ Pages 那个地址**接口功能用不了**：网关的跨域白名单只放行 CloudBase 域名，在 Pages 上点「接口数据」会被浏览器拦掉，报错还容易误读成「网络连不上」。
+> 部署与到期说明见下面「[部署、额度、到期与备份](#部署额度到期与备份)」。
+
+> 注意：**书单和笔记存在「打开页面的那台设备」自己的浏览器里**。你手机上记的和电脑上记的**互不相通**。接口那条链（CloudBase 域名下的「接口数据」页）走的是云端数据库，两处数据目前是分开的——把书单整体接到云端，是 v1.0 之后的第一件事。
 
 ### 方式一：直接双击（最省事）
 
@@ -132,6 +138,59 @@ node skills/pre-release-check/scripts/preflight.js --md docs/skill-runs/xxx.md  
 - 脚本会先看工作区干不干净，自动判 **DRAFT**（还没提交，第 8 条必然红，属预期）还是 **FINAL**（干净，这才是真的发布前状态）。
 
 它只检查、不修东西 —— 红了先报告，确认后再动手。完整的九条清单、判定规则和踩过的坑见 [`skills/pre-release-check/SKILL.md`](skills/pre-release-check/SKILL.md)。
+
+## 部署、额度、到期与备份
+
+> 这一节是**交付说明**：说清楚东西放在哪、什么时候会失效、坏了怎么救。**不含任何密钥。**
+
+### 云端有哪三块东西
+
+| 层 | 在哪 | 公网地址 / 标识 |
+|---|---|---|
+| 前端（静态页） | CloudBase **静态网站托管**（手动上传）+ **GitHub Pages**（推 main 自动构建） | `https://reading-sea-d7gd8l7o78b7304ae-1385227197.tcloudbaseapp.com` · `https://xingho-vibecoding.github.io/whale-fall-letters/` |
+| 后端（接口） | CloudBase **HTTP 型云函数** `books` + `health`（监听 9000 端口） | `https://reading-sea-d7gd8l7o78b7304ae.service.tcloudbase.com` |
+| 数据库 | CloudBase **PostgreSQL**（表 `books` / `notes`） | 只能经云函数内部的 PG HTTP API 访问，公网不直连 |
+
+⚠️ **两个前端地址不等价**：静态页一样，但接口只有 CloudBase 域名能用（网关跨域白名单只放行 `*.tcloudbaseapp.com`）。**对外给链接、演示接口，一律用 CloudBase 那个。**
+
+### 怎么部署
+
+| 改了什么 | 怎么做 | 会自动吗 |
+|---|---|---|
+| 前端 5 个文件（`index.html` `styles.css` `store.js` `app.js` `community.js`） | Pages：`git push`；静态托管：**控制台手动上传覆盖** | Pages 自动（1–3 分钟）；**静态托管不会自动，必须手传** |
+| 云函数 | 控制台在线编辑器粘贴 → `Ctrl+S` → 「部署」→ 提示无 package.json 时选「**部署且不安装依赖**」 | 不会，必须手动 |
+| 数据库结构 | 先执行 `db/migration-*.sql`，**再**部署新函数（顺序反了会报 `column ... does not exist`） | 不会 |
+
+**提交 ≠ 上线。** 判断线上是哪个版本，别看提交记录，去比字节：`curl -sS --ssl-no-revoke <地址>/community.js | wc -c`。
+
+### 到期与额度
+
+| 项 | 值 | 状态 |
+|---|---|---|
+| 环境 ID | `reading-sea-d7gd8l7o78b7304ae`（体验版，上海） | 已知 |
+| 到期时间 | **2027-04-13** | 已记录，**待控制台截图复核** |
+| 剩余资源点 / 用量明细 | 待填 | ⏳ 未核（曾按线性外推估「11 月初见底」，没看明细） |
+| 是否开启按量计费 | 待填 | ⏳ 未核（按约束**不应开启**） |
+
+**到期后会怎样**：公网地址直接打不开，不会提前很久提醒。代码在 GitHub 上永久留着；数据只能靠到期前导出的备份。
+
+### 备份（当前是空的，如实写）
+
+| 项 | 状态 |
+|---|---|
+| 数据库自动备份 | ❌ **没配** |
+| 手动导出过一次 | ❌ **没有** |
+| 回滚手册 | ✅ [`docs/ROLLBACK.md`](docs/ROLLBACK.md)（四类路径 + 三档判断表 + 60 秒流程；静态托管那条实操过，云函数/数据库/数据三条只写在册未实操） |
+| 代码备份 | ✅ GitHub 远端仓库 |
+
+⚠️ **现在硬删数据不可救**。软删除（`books.is_deleted`）只能救「通过接口删掉」的书，且笔记会一并回来；直接删库、删表、删环境，没有备份就是真的没了。
+**到期前必须做一次导出**，方法见 [`docs/ROLLBACK.md`](docs/ROLLBACK.md) 与 CloudBase PostgreSQL 控制台（未实操，做的时候要现查界面）。
+
+### 密钥放在哪
+
+`PG_API_KEY` 只存在云函数的**环境变量**里，不在代码、不在 `.env`、不在本次提交里。仓库里能看到的只有 `.env.example` 里的占位符。
+
+---
 
 ## 目录结构
 

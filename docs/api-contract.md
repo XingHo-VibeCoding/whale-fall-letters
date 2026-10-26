@@ -22,7 +22,10 @@
 
 > ⚠️ 网关只映射 `/api/books` 前缀（Day 22 实测）：其他路径（如 `/api/no-such-path`）在网关层就被拦下，
 > 返回 `{"code":"INVALID_PATH"}`，**请求根本到不了函数**。排查时别把网关的 404 当成函数的 bug；
-> 要探测函数版本，请用 `GET /api/books/book-001` 这类已映射路径。
+> 要探测函数是否活着，用 `GET /api/health`；要探测「函数 → 数据库」是否通，用 `GET /api/books`。
+> ⚠️ **更正（Day 28 实测）**：`GET /api/books/:id`（查单本）**从未实现**，请求它会返回
+> `{"ok":false,"error":"未知路径，本服务提供 GET/POST /api/books 与 PATCH/DELETE /api/books/:id"}`。
+> 此前本文档和 `ROLLBACK.md` 都拿它当探针，是错的——真出事时照那句做，会得到「函数挂了」的误判。
 
 > 前端 `community.js` 的 `API_DEMO_URL` 从 Day 20 起用的是首选（service）域名。
 
