@@ -443,6 +443,268 @@
     });
   }
 
+  /* ------------------------------------------------------ 写队列（串行） */
+
+  var queue = [];
+  var draining = false;
+
+  var status = {
+    pending: 0,      // 队列里还没发出去的
+    sent: 0,         // 成功发出去几次
+    failed: 0,       // 失败几次（每次失败都会回滚本地）
+    lastError: null, // 最近一次错误（给界面提示用）
+    lastOkAt: null   // 最近一次成功的时间
+  };
+
+  function enqueue(task) {
+    status.pending++;
+    return new Promise(function (resolve, reject) {
+      queue.push({ task: task, resolve: resolve, reject: reject });
+      drain();
+    });
+  }
+
+  /**
+   * 串行消费队列。
+   *
+   * 为什么不用并发：同一个用户连续点两下「添加」，两本书并发发过去，
+   * 万一第一本失败要回滚，第二本的地基就没了。串行慢一点，但顺序可预期。
+   */
+  function drain() {
+    if (draining) return;
+    var item = queue.shift();
+    if (!item) return;
+    draining = true;
+
+    var p;
+    try {
+      p = item.task();
+    } catch (e) {
+      p = Promise.reject(e);
+    }
+
+    p.then(function (v) {
+      status.pending--;
+      status.sent++;
+      status.lastOkAt = new Date().toISOString();
+      draining = false;
+      item.resolve(v);
+      drain();
+    }, function (e) {
+      status.pending--;
+      status.failed++;
+      status.lastError = e;
+      draining = false;
+      item.reject(e);
+      drain();
+    });
+  }
+
+  /** 队列空了没有。测试和「退出前等一下」用。 */
+  function settle() {
+    return new Promise(function (resolve) {
+      (function check() {
+        if (!draining && queue.length === 0 && status.pending === 0) return resolve(status);
+        setTimeout(check, 20);
+      })();
+    });
+  }
+
+  /* -------------------------------------------------- 本地回滚（三处共用） */
+
+  /** 只把接口认的白名单字段挑出来发，别把本地 id、时间戳塞过去。 */
+  function pickWritable(src) {
+    var out = {};
+    var keys = ['title', 'author', 'coverUrl', 'status', 'totalPages', 'currentPage'];
+    for (var i = 0; i < keys.length; i++) {
+      if (src && Object.prototype.hasOwnProperty.call(src, keys[i])) out[keys[i]] = src[keys[i]];
+    }
+    return out;
+  }
+
+  /** 服务端返回的书，用它替换本地那条（主要是把本地 id 换成云端 id）。 */
+  function adoptServerBook(localId, serverBook) {
+    var S = global.Store;
+    if (!S || !serverBook) return false;
+    var list = S.listBooks();
+    if (!list.ok) return false;
+    var hit = false;
+    for (var i = 0; i < list.data.length; i++) {
+      if (list.data[i].id === localId) { list.data[i] = serverBook; hit = true; break; }
+    }
+    if (!hit) return false;
+    return S.replaceBooks(list.data).ok;
+  }
+
+  // 接线前的原始方法。回滚必须走这里，绝不能走被包过的 Store.xxx。
+  //
+  // ⚠️ 这个坑是踩出来的（Day 29 自测第一次就红）：pushAdd 失败时如果调
+  //    Store.deleteBook() 回滚，而这个方法已经被 installHooks 包过，
+  //    于是「回滚」本身又变成一次删除请求 → 也失败 → 又走 restoreBook 把书放回来。
+  //    结果：本地剩一本、failed 计数变成 2、报错文案显示成「删除」。
+  //    一句话：**回滚动作不能被自己的监听器捕获。**
+  var origMethods = { add: null, update: null, del: null };
+
+  /**
+   * 把某本书恢复成本地快照（回滚用）。
+   * 存在就替换，不存在就加回去——删除失败了要能把它放回原位。
+   */
+  function restoreBook(snapshot) {
+    if (!snapshot || !snapshot.id) return false;
+    var S = global.Store;
+    var list = S.listBooks();
+    if (!list.ok) return false;
+    for (var i = 0; i < list.data.length; i++) {
+      if (list.data[i].id === snapshot.id) {
+        list.data[i] = snapshot;
+        return S.replaceBooks(list.data).ok;
+      }
+    }
+    list.data.push(snapshot);
+    return S.replaceBooks(list.data).ok;
+  }
+
+  /* ------------------------------------------------------------ 三条写路径 */
+
+  /**
+   * 新增：本地已经写好了（界面已反馈），这里只负责推到云端。
+   * 推不上去就把本地那条撤掉——**不能留一个“看着存上了、其实没存”的记录**。
+   */
+  function pushAdd(localBook) {
+    return enqueue(function () {
+      return request('POST', '/api/books', pickWritable(localBook)).then(function (res) {
+        var serverBook = res && res.data && res.data.book;
+        if (serverBook) adoptServerBook(localBook.id, serverBook);
+        return serverBook;
+      }, function (err) {
+        // 回滚：把本地这条撤掉。走原始 delete（不是被包过的那个），
+        // 否则回滚本身又变成一次删除请求，见 origMethods 那段的说明。
+        var del = origMethods.del || global.Store.deleteBook;
+        del.call(global.Store, localBook.id);
+        throw err;
+      });
+    });
+  }
+
+  /** 修改：失败就用改动前的快照盖回去。 */
+  function pushUpdate(bookId, patch, before) {
+    var body = pickWritable(patch);
+    return enqueue(function () {
+      return request('PATCH', '/api/books/' + encodeURIComponent(bookId), body).then(function (res) {
+        var serverBook = res && res.data && res.data.book;
+        if (serverBook) adoptServerBook(bookId, serverBook);
+        return serverBook;
+      }, function (err) {
+        restoreBook(before);                     // 回滚
+        throw err;
+      });
+    });
+  }
+
+  /** 删除：失败就把那本书（连同它的字段）放回本地。 */
+  function pushDelete(bookId, before) {
+    return enqueue(function () {
+      return request('DELETE', '/api/books/' + encodeURIComponent(bookId)).then(function (res) {
+        return res && res.data;
+      }, function (err) {
+        restoreBook(before);                     // 回滚
+        throw err;
+      });
+    });
+  }
+
+  /* -------------------------------------------------------------- 接线 */
+
+  /**
+   * 把 Store 的三个写方法包一层：**先照原样同步执行**（界面立刻有反馈，
+   * 和现在一模一样），成功后再异步推云端。所以 app.js 一行都不用改。
+   *
+   * 失败时：本地回滚 + status.lastError 有值 + 调 onError 回调（如果有）。
+   * ⚠️ 本版**还没有界面级的失败提示**（横幅/toast），只写 console。
+   *    所以「联网状态下正常用」没问题，但断网时用户只看得到 console——
+   *    这一步的 UI 提示留到下一版，别假装已经有了。
+   */
+  function installHooks() {
+    if (!enabled) return false;
+
+    var S = global.Store;
+    if (!S || S.__syncHooked) return false;
+
+    var origAdd = S.addBook;
+    var origUpdate = S.updateBook;
+    var origDelete = S.deleteBook;
+    var origGet = S.getBook;
+
+    // 存下来给回滚用（回滚不能被自己的监听器捕获）
+    origMethods.add = origAdd;
+    origMethods.update = origUpdate;
+    origMethods.del = origDelete;
+
+    function report(err, what) {
+      status.lastError = err;
+      try {
+        console.error('[sync] ' + what + ' 没同步到云端，本地已回滚：' +
+          describeApiError(err));
+      } catch (e) { /* console 不可用就算了 */ }
+      if (typeof onError === 'function') {
+        try { onError(err, what); } catch (e) { /* 回调自己炸了不该影响主流程 */ }
+      }
+    }
+
+    S.addBook = function (input) {
+      var r = origAdd(input);                       // 先本地，同步返回
+      if (r && r.ok) {
+        pushAdd(r.data).then(null, function (e) { report(e, '添加《' + r.data.title + '》'); });
+      }
+      return r;
+    };
+
+    S.updateBook = function (bookId, patch) {
+      var snap = origGet(bookId);
+      var before = snap && snap.ok ? JSON.parse(JSON.stringify(snap.data)) : null;
+      var r = origUpdate(bookId, patch);            // 先本地
+      if (r && r.ok) {
+        pushUpdate(bookId, patch, before).then(null, function (e) { report(e, '修改'); });
+      }
+      return r;
+    };
+
+    S.deleteBook = function (bookId) {
+      var snap = origGet(bookId);
+      var before = snap && snap.ok ? JSON.parse(JSON.stringify(snap.data)) : null;
+      var r = origDelete(bookId);                   // 先本地
+      if (r && r.ok) {
+        pushDelete(bookId, before).then(null, function (e) { report(e, '删除'); });
+      }
+      return r;
+    };
+
+    S.__syncHooked = true;
+    return true;
+  }
+
+  /** 拆掉接线（排查问题用，正常别调）。 */
+  function uninstallHooks() {
+    // 没有保留原始引用就不能安全还原，所以这里只做标记撤销的提示，不真的改回去。
+    // 真要还原，刷新页面最干净——这也说明接线本身是可逆的：不调 installHooks 就没有。
+    return false;
+  }
+
+  var onError = null;
+  function setErrorHandler(fn) { onError = typeof fn === 'function' ? fn : null; return true; }
+
+  function getStatus() {
+    return {
+      enabled: enabled,
+      pending: status.pending,
+      sent: status.sent,
+      failed: status.failed,
+      lastError: status.lastError ? describeApiError(status.lastError) : null,
+      lastOkAt: status.lastOkAt,
+      hooked: !!(global.Store && global.Store.__syncHooked)
+    };
+  }
+
   /* -------------------------------------------------------------- 导出 */
 
   global.Sync = {
@@ -465,6 +727,16 @@
 
     readLocalNotes: readLocalNotes,
     remapNotes: remapNotes,
+
+    installHooks: installHooks,
+    uninstallHooks: uninstallHooks,
+    setErrorHandler: setErrorHandler,
+    getStatus: getStatus,
+    settle: settle,
+
+    pushAdd: pushAdd,
+    pushUpdate: pushUpdate,
+    pushDelete: pushDelete,
 
     describeApiError: describeApiError,
     API_BASE: API_BASE
