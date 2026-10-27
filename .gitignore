@@ -58,6 +58,10 @@ __pycache__/
 site-packages/
 
 # ---------- 3. 本地数据库文件 ----------
+# 逻辑备份（tools/backup-pg.js 的产物）
+# ⚠️ 里面是全库原始数据，含 passwordHash / salt / 会话 token —— 绝不进仓库
+backups/
+*.dump
 *.db
 *.db-journal
 *.sqlite
