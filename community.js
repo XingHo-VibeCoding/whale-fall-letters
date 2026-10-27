@@ -135,8 +135,110 @@
     avatarImage: null,          // 注册时上传的图片头像 dataURL（null=未传）
     postFromBook: false,        // 帖子详情是从「同书列表」进来的吗
     lastBookTitle: null,        // 最近一次点热门书看的是哪本（返回时用）
-    profileUserId: null         // 正在看的个人主页属于谁（null=未打开）
+    profileUserId: null,        // 正在看的个人主页属于谁（null=未打开）
+    authBusy: false             // 正在提交登录/注册（防连点重复提交）
   };
+
+  /* =============================================================
+   * 1.1 账号接口（Day 30 第一阶段）
+   *
+   * 在这之前这里全是假的：MOCK_USERS 写死三个用户、注册只往内存 push
+   * （刷新就没）、登录连密码都不校验。现在改成真的打后端 /api/auth/*。
+   *
+   * 登录状态的载体是一个 token（64 位十六进制随机串），存在 localStorage。
+   * 打开页面时拿它去换「我是谁」——这就是"刷新不掉线"的全部秘密。
+   * token 本身不是密码，它只是"这次登录"的临时凭证，退出登录即作废。
+   * ============================================================= */
+
+  var API_BASE =
+    (window.Sync && window.Sync.API_BASE) ||
+    'https://reading-sea-d7gd8l7o78b7304ae.service.tcloudbase.com';
+
+  var KEY_TOKEN = 'reading:token';
+
+  function loadToken() {
+    try { return window.localStorage.getItem(KEY_TOKEN) || ''; } catch (e) { return ''; }
+  }
+
+  function saveToken(t) {
+    try { window.localStorage.setItem(KEY_TOKEN, t); return true; } catch (e) { return false; }
+  }
+
+  function clearToken() {
+    try { window.localStorage.removeItem(KEY_TOKEN); return true; } catch (e) { return false; }
+  }
+
+  /**
+   * 调账号接口。返回 Promise<data>；失败 reject 一个 Error，
+   * 它的 message 已经是可以直接显示给用户的中文（不用再翻译一次）。
+   *
+   * 四类失败分别给不同的话（和 sync.js 的口径一致）：
+   *   连不上 / HTTP 非 2xx / 返回不是 JSON / 业务 ok:false
+   */
+  function authRequest(method, path, body, token) {
+    var opts = { method: method, headers: {} };
+    if (body !== undefined) {
+      opts.headers['Content-Type'] = 'application/json';
+      opts.body = JSON.stringify(body);
+    }
+    if (token) opts.headers['Authorization'] = 'Bearer ' + token;
+
+    return fetch(API_BASE + path, opts)
+      .catch(function () {
+        // fetch 自己抛 = 断网 / 跨域被拦 / DNS 挂了
+        throw new Error('连不上服务器，请检查网络后重试');
+      })
+      .then(function (r) {
+        // 先取 text 再 parse：网关出错时回的是 HTML 页，
+        // 直接 r.json() 会抛 "Unexpected token '<'"，既看不懂也指不出是谁的问题
+        return r.text().then(function (text) { return { status: r.status, text: text }; });
+      })
+      .then(function (res) {
+        if (res.status < 200 || res.status >= 300) {
+          throw new Error('服务器返回 ' + res.status + '，请稍后重试');
+        }
+        var parsed;
+        try { parsed = JSON.parse(res.text); }
+        catch (e) { throw new Error('服务器返回的内容看不懂，可能网关出错了'); }
+        // 后端的业务失败一律 HTTP 200 + ok:false —— 看 ok 字段，别看状态码
+        if (parsed && parsed.ok === false) {
+          throw new Error(parsed.error || '请求被服务端拒绝');
+        }
+        return parsed.data;
+      });
+  }
+
+  /**
+   * 打开页面时用存着的 token 换「我是谁」。
+   * 成功 = 自动登录；失败 = token 过期/被删，静默清掉当作未登录。
+   *
+   * 为什么不弹错误：绝大多数情况下用户只是没登录，不是出了错。
+   * 每次打开站点都甩一个红条，比不提示更糟。
+   */
+  function restoreSession() {
+    var tk = loadToken();
+    if (!tk) return;
+
+    authRequest('GET', '/api/auth/me', undefined, tk).then(
+      function (data) {
+        if (!data || !data.user) { clearToken(); return; }
+        state.currentUser = data.user;
+        state.avatarColor = null;
+        state.avatarImage = null;
+        updateNavUser();
+        // 登录态变了，正在看的那页要重画（导航、"我的"页、个人主页都受影响）。
+        // 参数 true = 启动阶段，不擦掉 app.js 设的全局告警（Day 12 修过的 bug）
+        var h = (window.location.hash || '').replace(/^#/, '');
+        if (h === '/me' || h === '/login' || h.indexOf('/user/') === 0) {
+          try { applyRoute(true); } catch (e) { /* 重画失败不该影响登录态 */ }
+        }
+      },
+      function () {
+        // token 失效是正常事（七天到期 / 在别处退出过），清掉就行
+        clearToken();
+      }
+    );
+  }
 
   /* =============================================================
    * 1. 小工具
@@ -162,6 +264,9 @@
 
   function usernameById(id) {
     if (id === 'me') return state.currentUser ? state.currentUser.username : '我';
+    // Day 30：真登录用户的 id 是后端生成的 user-mvqxxx，不在 MOCK_USERS 里，
+    // 所以先跟自己比对一次，否则「我刚发的帖/评论」会显示成"读者"
+    if (state.currentUser && state.currentUser.id === id) return state.currentUser.username;
     for (var i = 0; i < MOCK_USERS.length; i++) {
       if (MOCK_USERS[i].id === id) return MOCK_USERS[i].username;
     }
@@ -170,6 +275,7 @@
 
   function userById(id) {
     if (id === 'me') return state.currentUser;
+    if (state.currentUser && state.currentUser.id === id) return state.currentUser;
     for (var i = 0; i < MOCK_USERS.length; i++) {
       if (MOCK_USERS[i].id === id) return MOCK_USERS[i];
     }
@@ -1957,51 +2063,64 @@
   function doAuth() {
     var name = byId('auth-username').value.trim();
     var pwd = byId('auth-password').value;
-    var err = byId('auth-error');
+    var errBox = byId('auth-error');
     // 校验（COMMUNITY_DESIGN.md 4.1）
-    if (!name) { err.textContent = '账号名不能为空'; err.hidden = false; return; }
-    if (name.length < 2 || name.length > 20) { err.textContent = '账号名需 2~20 个字符'; err.hidden = false; return; }
-    if (!/^[\u4e00-\u9fa5A-Za-z0-9_]+$/.test(name)) { err.textContent = '账号名只能含中文、字母、数字、下划线'; err.hidden = false; return; }
-    if (!pwd || pwd.length < 6) { err.textContent = '密码至少 6 位'; err.hidden = false; return; }
+    // ⚠️ 前端校验只是"省一次网络往返"，不是安全措施：
+    //    谁都能绕开页面直接打接口，所以后端会**再挡一遍**（同样的规则）。
+    if (!name) { errBox.textContent = '账号名不能为空'; errBox.hidden = false; return; }
+    if (name.length < 2 || name.length > 20) { errBox.textContent = '账号名需 2~20 个字符'; errBox.hidden = false; return; }
+    if (!/^[\u4e00-\u9fa5A-Za-z0-9_]+$/.test(name)) { errBox.textContent = '账号名只能含中文、字母、数字、下划线'; errBox.hidden = false; return; }
+    if (!pwd || pwd.length < 6) { errBox.textContent = '密码至少 6 位'; errBox.hidden = false; return; }
 
-    if (state.authMode === 'register') {
-      // 账号名占用校验（大帅点名要求：相同账号名无法注册，明确提示）
-      for (var i = 0; i < MOCK_USERS.length; i++) {
-        if (MOCK_USERS[i].username === name) {
-          err.textContent = '该账号名已被使用，无法注册';
-          err.hidden = false;
-          return;
-        }
-      }
+    // 防连点：一秒钟点三下不该发三个注册请求（第三个必然撞"账号名已被使用"）
+    if (state.authBusy) return;
+    state.authBusy = true;
+
+    var isRegister = state.authMode === 'register';
+    var btn = byId('btn-auth-submit');
+    var oldText = btn ? btn.textContent : '';
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = isRegister ? '注册中…' : '登录中…';
+    }
+    errBox.hidden = true;
+
+    var payload = { username: name, password: pwd };
+    if (isRegister) {
       var avatar = state.avatarImage || state.avatarColor || '';
-      var newUser = { id: 'user_' + Date.now(), username: name, avatar: avatar, bio: '' };
-      MOCK_USERS.push(newUser);
-      state.currentUser = newUser;
-      // 重置头像选择状态，避免下次注册残留
-      state.avatarColor = null;
-      state.avatarImage = null;
-      err.hidden = true;
-      clearError();
-      clearSuccess();
-      updateNavUser();
-      go('/');
-      showSuccess('注册成功，欢迎 ' + newUser.username + '！');
-      return;
+      if (avatar) payload.avatar = avatar;   // 没选就不传，后端用空串
     }
 
-    // 登录：查账号名是否存在（mock 只查账号名，不校验密码——真实后端会校验）
-    var found = null;
-    for (var j = 0; j < MOCK_USERS.length; j++) {
-      if (MOCK_USERS[j].username === name) { found = MOCK_USERS[j]; break; }
+    function settle() {
+      state.authBusy = false;
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
     }
-    if (!found) { err.textContent = '账号名或密码错误'; err.hidden = false; return; }
-    state.currentUser = found;
-    err.hidden = true;
-    clearError();
-    clearSuccess();
-    updateNavUser();
-    go('/');
-    showSuccess('欢迎回来，' + found.username + '！');
+
+    authRequest('POST', isRegister ? '/api/auth/register' : '/api/auth/login', payload).then(
+      function (data) {
+        if (!data || !data.user || !data.token) {
+          throw new Error('服务器没返回登录凭证，请稍后重试');
+        }
+        saveToken(data.token);          // 存起来，刷新后靠它自动登录
+        state.currentUser = data.user;
+        // 重置头像选择状态，避免下次注册残留
+        state.avatarColor = null;
+        state.avatarImage = null;
+        errBox.hidden = true;
+        clearError();
+        clearSuccess();
+        updateNavUser();
+        settle();
+        go('/');
+        showSuccess((isRegister ? '注册成功，欢迎 ' : '欢迎回来，') + data.user.username + '！');
+      },
+      function (e) {
+        // 后端已经把原因说成人话了（"该账号名已被使用，无法注册"之类），直接显示
+        settle();
+        errBox.textContent = (e && e.message) || '操作失败，请稍后重试';
+        errBox.hidden = false;
+      }
+    );
   }
 
   function updateNavUser() {
@@ -2179,9 +2298,18 @@
       logout.type = 'button';
       logout.textContent = '退出登录';
       logout.addEventListener('click', function () {
+        var tk = loadToken();
+        // 先从界面上退出来（不等网络），再顺手通知后端删会话。
+        // 顺序不能反：网络卡住时用户点"退出"却半天没反应，比退得慢更难受。
         state.currentUser = null;
+        clearToken();
         updateNavUser();
         go('/');
+        // 后端删不掉也不打扰用户：本地凭证已经清了，这台机器上就是未登录状态。
+        // 那条会话会在七天后自然过期（登录时还会顺手清理该用户的过期会话）。
+        if (tk) {
+          authRequest('POST', '/api/auth/logout', undefined, tk).then(null, function () {});
+        }
       });
       card.appendChild(logout);
     }
@@ -2439,6 +2567,13 @@
     byId('avatar-file-input').addEventListener('change', function (e) {
       var file = e.target.files && e.target.files[0];
       if (!file) return;
+      // Day 30：头像现在要存进数据库，后端上限 30000 字符。
+      // dataURL 大约是原文件的 1.37 倍，所以 21KB 以上的图片传上去必被拒。
+      // 在这里先拦一次 —— 让用户在上传那一刻就知道，而不是填完整个表单再被拒。
+      if (file.size > 21000) {
+        showError('头像图片太大了（超过 20KB），换一张小一点的');
+        return;
+      }
       var reader = new FileReader();
       reader.onload = function (ev) {
         state.avatarImage = ev.target.result;
@@ -2980,6 +3115,9 @@
     bindNav();
     bindEvents();
     updateNavUser();
+    // Day 30：拿存着的 token 换「我是谁」（刷新不掉线就靠这一句）。
+    // 异步的，所以它回来时页面已经画完了，函数内部会自己补一次重画。
+    restoreSession();
     // Day 20+：星海模块（守护鲸/图鉴/数据卡/今日一句/开场轻震）
     initStarSea();
     // 按地址栏的 hash 落到对应页面（Day 13）。
