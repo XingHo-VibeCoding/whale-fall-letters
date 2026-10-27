@@ -26,40 +26,6 @@
   // 预设头像色板（色块头像可选）
   var AVATAR_COLORS = ['#1f6f6b', '#b3261e', '#7a6a4f', '#2f6b3a', '#5b5bd6', '#b0643a', '#8a3ab0', '#3a7a8a'];
 
-  // 已注册账号（模拟数据库 users 表）。密码只存明文做演示，
-  // 真实后端会存哈希（COMMUNITY_DESIGN.md 4.2），这里绝不照搬。
-  // avatar：字符串——色块颜色值（如 '#1f6f6b'）或图片 dataURL；空=用首字占位
-  // shelves：该用户的书单，四类：want 想读 / reading 在读 / finished 已读 / favorite 喜欢
-  var MOCK_USERS = [
-    {
-      id: 'user_1', username: '阿澈', avatar: '', bio: '喜欢科幻和推理',
-      shelves: {
-        want: ['沙丘', '银河帝国'],
-        reading: ['三体'],
-        finished: ['球状闪电', '献给阿尔吉侬的花束'],
-        favorite: ['三体', '银河系漫游指南']
-      }
-    },
-    {
-      id: 'user_2', username: '小林', avatar: '', bio: '在读历史类',
-      shelves: {
-        want: ['万历十五年'],
-        reading: ['明朝那些事儿'],
-        finished: ['人类简史'],
-        favorite: ['明朝那些事儿']
-      }
-    },
-    {
-      id: 'user_3', username: '月白', avatar: '', bio: '什么都读一点',
-      shelves: {
-        want: ['百年孤独'],
-        reading: [],
-        finished: ['围城', '活着'],
-        favorite: ['百年孤独', '活着']
-      }
-    }
-  ];
-
   // 帖子缓存（Day 30 改造）
   //
   // 这里原来是一段写死的假数据（post_1/post_2/post_3 三篇），你发的评论只 push
@@ -69,14 +35,6 @@
   // 变量名故意没改：下面十几处读 MOCK_POSTS 的代码一行都不用动，
   // 它们读到的仍然是 MOCK_POSTS，只是里面装的东西变成了数据库里的真帖子。
   var MOCK_POSTS = [];
-
-  // 全站收藏量（mock）。按「书名」存而不是按帖子 —— 同一本书有多个帖子时，
-  // 收藏量必须是同一个数，不能各算各的。
-  var MOCK_FAVORITES = {
-    '三体': 128,
-    '明朝那些事儿': 96,
-    '百年孤独': 342
-  };
 
   // Day 31：`MOCK_COMMENT_LIKES`（假点赞基数）已经删掉了。
   // 点赞数现在由后端 comment_likes 表算出来，和 comment 一起返回。
@@ -437,12 +395,10 @@
 
   function usernameById(id) {
     if (id === 'me') return state.currentUser ? state.currentUser.username : '我';
-    // Day 30：真登录用户的 id 是后端生成的 user-mvqxxx，不在 MOCK_USERS 里，
-    // 所以先跟自己比对一次，否则「我刚发的帖/评论」会显示成"读者"
+    // 真登录用户的 id 是后端生成的 user-mvqxxx，所以先跟自己比对一次，
+    // 否则「我刚发的帖/评论」会显示成"读者"。
+    // （Day 31 删掉了原来那三个写死的假用户，现在这里只认自己和接口缓存。）
     if (state.currentUser && state.currentUser.id === id) return state.currentUser.username;
-    for (var i = 0; i < MOCK_USERS.length; i++) {
-      if (MOCK_USERS[i].id === id) return MOCK_USERS[i].username;
-    }
     return '读者';
   }
 
@@ -451,9 +407,6 @@
     if (state.currentUser && state.currentUser.id === id) return state.currentUser;
     // Day 30：真注册用户（user-mvqxxx）从接口拉回来的资料缓存在这
     if (userCache[id]) return userCache[id];
-    for (var i = 0; i < MOCK_USERS.length; i++) {
-      if (MOCK_USERS[i].id === id) return MOCK_USERS[i];
-    }
     return null;
   }
 
@@ -900,11 +853,6 @@
   var STAR_D = 'M10,4 L11.41,8.06 L15.71,8.15 L12.28,10.74 L13.53,14.85 L10,12.4 L6.47,14.85 L7.72,10.74 L4.29,8.15 L8.59,8.06 Z';
   var SVG_NS = 'http://www.w3.org/2000/svg';
 
-  function baseFavorites(title) {
-    var n = MOCK_FAVORITES[title];
-    return typeof n === 'number' ? n : 0;
-  }
-
   function statusLabel(s) {
     return s === 'reading' ? '在读' : (s === 'finished' ? '已读' : '想读');
   }
@@ -966,7 +914,9 @@
    */
   function renderFavButton(btn, post, justOn) {
     var st = favStateOf(post.title);
-    var count = baseFavorites(post.title) + (st.inShelf ? 1 : 0);
+    // Day 31：数字删掉了。原来那个 MOCK_FAVORITES 是写死的假数（128/96/342），
+    // 跟真实收藏毫无关系。真实收藏数要跨用户统计（新接口 + 新查询），
+    // 本阶段先只保留状态文字（收藏 / 已收藏 / 已在书架），不给假数字。
     var cls = 'fav-btn';
     var text;
 
@@ -994,11 +944,6 @@
     label.className = 'fav-label';
     label.textContent = text;
     btn.appendChild(label);
-
-    var num = document.createElement('span');
-    num.className = 'fav-count';
-    num.textContent = String(count);
-    btn.appendChild(num);
 
     btn.setAttribute('aria-pressed', (st.inShelf && st.status === 'want') ? 'true' : 'false');
 
@@ -1133,7 +1078,7 @@
     var authorName = document.createElement('a');
     authorName.className = 'user-link';
     // Day 30：后端已经把作者名拼好一起返回了（authorName）。
-    // 优先用它 —— 真注册用户的 id 是 user-mvqxxx，查 MOCK_USERS 那三个假人永远查不到。
+    // 优先用它 —— 真注册用户的 id 是 user-mvqxxx，本地不一定查得到，兜底才是 usernameById。
     authorName.textContent = post.authorName || usernameById(post.authorId);
     authorName.href = '#';
     (function (uid) {
