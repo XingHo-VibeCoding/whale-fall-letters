@@ -1,0 +1,160 @@
+/**
+ * db.js —— 论坛接口的数据访问层（Day 30 第二阶段）
+ *
+ * 职责边界（与 books/db.js、auth/db.js 一致）：
+ *   - 只负责「和数据库说话」，不做输入校验（那是 index.js 的活）；
+ *   - 出错就 throw，由接口层 catch 后翻成人话。
+ *
+ * 通道：PostgreSQL 的 HTTP API（PostgREST 风格），零 npm 依赖。
+ *
+ * ⚠️ 两处容易踩的地方：
+ *   ① 列表要显示"谁发的"，但没建物理外键，PostgREST 的嵌套 select 用不了。
+ *      所以是「先查帖子 → 收集 authorId → 批量查用户 → 内存里拼」。
+ *      两次查询固定，不会随帖子数增长（不做 N+1）。
+ *   ② PostgREST 的 in.(a,b,c) 语法里，值不能含逗号。
+ *      我们所有 id 都是 `post-xxx` / `user-xxx` 这种格式，安全。
+ */
+
+const REQUEST_TIMEOUT_MS = 8000;
+
+function headers(apiKey, json) {
+  const h = { Authorization: `Bearer ${apiKey}` };
+  if (json) h["Content-Type"] = "application/json";
+  return h;
+}
+
+function restUrl(baseUrl, table, params) {
+  const qs = params ? `?${new URLSearchParams(params)}` : "";
+  return `${baseUrl}/v1/rdb/rest/${table}${qs}`;
+}
+
+async function getRows(table, params, baseUrl, apiKey) {
+  const resp = await fetch(restUrl(baseUrl, table, params), {
+    headers: headers(apiKey),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function insertRow(table, row, baseUrl, apiKey) {
+  const resp = await fetch(restUrl(baseUrl, table), {
+    method: "POST",
+    headers: headers(apiKey, true),
+    body: JSON.stringify(row),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+}
+
+// ---------------------------------------------------------------- 登录态
+
+/** 按 token 查会话（与 auth 函数同一张 sessions 表）。没查到返回 null。 */
+async function findSessionByToken(token, baseUrl, apiKey) {
+  if (!token) throw new Error("findSessionByToken 缺少 token，已中止");
+  const rows = await getRows(
+    "sessions",
+    { select: "*", token: `eq.${token}`, limit: "1" },
+    baseUrl,
+    apiKey
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+async function findUserById(id, baseUrl, apiKey) {
+  if (!id) throw new Error("findUserById 缺少 id，已中止");
+  const rows = await getRows("users", { select: "*", id: `eq.${id}`, limit: "1" }, baseUrl, apiKey);
+  return rows.length > 0 ? rows[0] : null;
+}
+
+// ---------------------------------------------------------------- 帖子
+
+/** 帖子列表，按发帖时间倒序。limit 不传 = 全部（当前数据量不需要分页）。 */
+async function fetchPosts(limit, baseUrl, apiKey) {
+  const params = { select: "*", order: "createdAt.desc", is_deleted: "eq.false" };
+  if (limit !== undefined) params.limit = String(limit);
+  return getRows("posts", params, baseUrl, apiKey);
+}
+
+async function fetchPostById(id, baseUrl, apiKey) {
+  if (!id) throw new Error("fetchPostById 缺少 id，已中止");
+  const rows = await getRows(
+    "posts",
+    { select: "*", id: `eq.${id}`, is_deleted: "eq.false", limit: "1" },
+    baseUrl,
+    apiKey
+  );
+  return rows.length > 0 ? rows[0] : null;
+}
+
+async function insertPost(row, baseUrl, apiKey) {
+  await insertRow("posts", row, baseUrl, apiKey);
+}
+
+// ---------------------------------------------------------------- 评论
+
+/** 某篇帖子的全部评论，按时间**正序**（先发的在上面，跟聊天记录相反）。 */
+async function fetchCommentsByPostId(postId, baseUrl, apiKey) {
+  if (!postId) throw new Error("fetchCommentsByPostId 缺少 postId，已中止");
+  return getRows(
+    "comments",
+    { select: "*", postId: `eq.${postId}`, order: "createdAt.asc", is_deleted: "eq.false" },
+    baseUrl,
+    apiKey
+  );
+}
+
+async function insertComment(row, baseUrl, apiKey) {
+  await insertRow("comments", row, baseUrl, apiKey);
+}
+
+/**
+ * 批量统计「每篇帖子有几条评论」，返回 { [postId]: 数字 }。
+ * 一次查询拿走所有 postId 列，在内存里数 —— 数据量小的时候比给每篇帖子发一次 count 划算得多。
+ */
+async function countCommentsByPostIds(postIds, baseUrl, apiKey) {
+  const out = {};
+  if (!postIds || postIds.length === 0) return out;
+  const rows = await getRows(
+    "comments",
+    { select: "postId", postId: `in.(${postIds.join(",")})`, is_deleted: "eq.false" },
+    baseUrl,
+    apiKey
+  );
+  for (const r of rows) out[r.postId] = (out[r.postId] || 0) + 1;
+  return out;
+}
+
+// ---------------------------------------------------------------- 用户信息
+
+/**
+ * 批量取用户，只拿显示需要的三列（id / username / avatar）。
+ * **绝不 select=***，那会把 passwordHash 和 salt 一起拉进内存，
+ * 虽然不会返回给前端，但完全没有理由让它们出现在这个函数里。
+ */
+async function fetchUsersByIds(ids, baseUrl, apiKey) {
+  const out = {};
+  if (!ids || ids.length === 0) return out;
+  const uniq = Array.from(new Set(ids));
+  const rows = await getRows(
+    "users",
+    { select: "id,username,avatar", id: `in.(${uniq.join(",")})` },
+    baseUrl,
+    apiKey
+  );
+  for (const r of rows) out[r.id] = r;
+  return out;
+}
+
+module.exports = {
+  findSessionByToken,
+  findUserById,
+  fetchPosts,
+  fetchPostById,
+  insertPost,
+  fetchCommentsByPostId,
+  insertComment,
+  countCommentsByPostIds,
+  fetchUsersByIds,
+};
