@@ -158,8 +158,11 @@ users → books → notes → posts → comments → messages → sessions
 - **没有自动化**：目前靠手动跑脚本。真正的自动备份要一个定时任务 + 一个能存密钥的地方，
   这件事还没做。
 - **没有异地存储**：备份默认落在 `backups/`，需要人工另存。
-- **恢复没有脚本化**：上面情况 2、3 的"逐行写回"目前是手工作业。
-  表大了会很痛苦 —— 到那时再写 `tools/restore-pg.js`，不要提前造。
+- **恢复已脚本化**：`tools/restore-pg.js` 可以把备份里的行原样写回（连 id 一起），
+  支持 `--table` / `--id` / `--dry-run` / `--all`。用法见下面「五」。
+- ⚠️ **备份有"保鲜期"**：`backups/` 里可能同时躺着好几份，日期不同的内容也不同
+  （比如清理了测试数据之前的备份里还有那些垃圾）。**恢复前先看文件名和 `meta.createdAtBeijing`，
+  确认拿的是想要的那一份。** 演练时尤其容易踩这个坑。
 
 ---
 
@@ -177,3 +180,38 @@ users → books → notes → posts → comments → messages → sessions
 
 **从上往下，越靠上越致命。** `sessions` 是唯一一张丢了无所谓的表 ——
 这也是为什么整库恢复时它放在最后写回。
+
+---
+
+## 五、恢复脚本怎么用
+
+```bash
+# ① 先预览（强烈建议每次都先 dry-run）
+PG_API_KEY=xxx node tools/restore-pg.js --table books --id book-xxx --dry-run
+
+# ② 真写回某一行（演练用）
+PG_API_KEY=xxx node tools/restore-pg.js --table books --id book-xxx
+
+# ③ 写回整张表
+PG_API_KEY=xxx node tools/restore-pg.js --table books
+
+# ④ 整库重建（按 users → books → notes → posts → comments → messages → sessions 的顺序）
+PG_API_KEY=xxx node tools/restore-pg.js --all
+```
+
+参数说明：
+
+| 参数 | 作用 |
+|---|---|
+| `--file <路径>` | 指定备份文件；不传就取 `backups/` 里**文件名最大**的那份 |
+| `--table <表>` | 只处理这张表 |
+| `--id <id>` | 只处理这一行（要配合 `--table`） |
+| `--all` | 七张表全恢复，按依赖顺序 |
+| `--dry-run` | 只打印将要写什么，一个字节都不写 |
+
+**两个设计说明：**
+
+1. **遇到 409（这一行已存在）算"跳过"而不是"失败"。** 恢复时重复写同一行是常态，
+   不该因为这个中断整批。
+2. **写入是按行 POST，不是批量。** 慢一些，但哪一行失败一眼看得见 ——
+   整库恢复时，"悄悄少了一半"比"慢"可怕得多。
