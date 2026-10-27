@@ -107,7 +107,9 @@
     lastBookTitle: null,        // 最近一次点热门书看的是哪本（返回时用）
     profileUserId: null,        // 正在看的个人主页属于谁（null=未打开）
     authBusy: false,            // 正在提交登录/注册（防连点重复提交）
-    composeBusy: false          // 正在提交发帖（同上）
+    composeBusy: false,         // 正在提交发帖（同上）
+    searchQuery: '',            // 论坛当前搜索词（空 = 没在搜）
+    searchTimer: null           // 搜索防抖计时器
   };
 
   /* =============================================================
@@ -234,9 +236,16 @@
    * 装好之后所有渲染代码照旧读 MOCK_POSTS，它们不知道数据来自网络。
    * ============================================================= */
 
-  /** 拉帖子列表，填满缓存。失败时缓存保持原样（不擦掉上次的内容）。 */
-  function loadPosts() {
-    return authRequest('GET', '/api/posts').then(function (data) {
+  /**
+   * 拉帖子列表，填满缓存。传 q 就是搜索（Day 31）。
+   *
+   * 搜索为什么放在服务端而不是前端 filter：
+   *   前端只能搜"已经拉到手的那些帖子"，帖子一多就不准了（第一页之外的根本没加载）。
+   *   搜索的意义就是"找不在眼前的"，所以必须在库里查。
+   */
+  function loadPosts(q) {
+    var path = '/api/posts' + (q ? '?q=' + encodeURIComponent(q) : '');
+    return authRequest('GET', path).then(function (data) {
       var list = (data && data.posts) || [];
       MOCK_POSTS.length = 0;
       for (var i = 0; i < list.length; i++) {
@@ -794,7 +803,14 @@
     var empty = byId('post-empty');
     list.textContent = '';
 
-    if (MOCK_POSTS.length === 0) { empty.hidden = false; return; }
+    if (MOCK_POSTS.length === 0) {
+      // Day 31：搜索时和"真的一篇都没有"是两回事，说的话不能一样
+      empty.textContent = state.searchQuery
+        ? '没有找到和「' + state.searchQuery + '」相关的帖子。换个词试试，或者清除搜索看全部。'
+        : '还没有帖子，来发第一篇吧。';
+      empty.hidden = false;
+      return;
+    }
     empty.hidden = true;
 
     var posts = MOCK_POSTS.slice().sort(function (a, b) {
@@ -804,6 +820,65 @@
     for (var i = 0; i < posts.length; i++) {
       list.appendChild(buildPostCard(posts[i]));
     }
+  }
+
+  /* ---------------------------------------------------------------
+   * 论坛搜索（Day 31）
+   *
+   * 三个细节是有意为之：
+   *   ① 输入防抖 350ms —— 每敲一个字就发一次请求，中文输入法还会在拼音阶段
+   *      触发一堆中间态（zh、zho、zhon…），那是纯粹的浪费；
+   *   ② 空搜索词 = 恢复全部，不用单独点"刷新"；
+   *   ③ 结果条数显示在下面一行，而不是弹提示条 —— 它是持续状态，不是一次性反馈。
+   * --------------------------------------------------------------- */
+
+  function doForumSearch() {
+    var input = byId('forum-search');
+    if (!input) return;
+    var q = (input.value || '').trim();
+
+    if (state.searchTimer) window.clearTimeout(state.searchTimer);
+    state.searchTimer = window.setTimeout(function () {
+      state.searchQuery = q;
+      loadPosts(q).then(
+        function () {
+          renderPosts();
+          renderSearchHint();
+        },
+        function (e) {
+          showError((e && e.message) || '搜索失败，请稍后重试');
+        }
+      );
+    }, 350);
+  }
+
+  function renderSearchHint() {
+    var hint = byId('forum-search-hint');
+    var clearBtn = byId('btn-forum-search-clear');
+    if (!hint) return;
+
+    if (!state.searchQuery) {
+      hint.hidden = true;
+      if (clearBtn) clearBtn.hidden = true;
+      return;
+    }
+    if (clearBtn) clearBtn.hidden = false;
+    hint.hidden = false;
+    hint.textContent = '「' + state.searchQuery + '」找到 ' + MOCK_POSTS.length + ' 篇';
+  }
+
+  function clearForumSearch() {
+    var input = byId('forum-search');
+    if (input) input.value = '';
+    state.searchQuery = '';
+    if (state.searchTimer) window.clearTimeout(state.searchTimer);
+    loadPosts().then(
+      function () {
+        renderPosts();
+        renderSearchHint();
+      },
+      function () { /* 拉不到就保持现状 */ }
+    );
   }
 
   /* =============================================================
@@ -2840,6 +2915,20 @@
    * ============================================================= */
 
   function bindEvents() {
+    // 论坛搜索（Day 31）—— 元素只在论坛页，做存在性判断免得别的页面报错
+    var searchInput = byId('forum-search');
+    if (searchInput) {
+      searchInput.addEventListener('input', doForumSearch);
+      // 浏览器自带的搜索框有内置的 × 清除按钮，点它会触发 search 事件
+      searchInput.addEventListener('search', doForumSearch);
+      // Esc 一键清空：搜错了不用去摸鼠标
+      searchInput.addEventListener('keydown', function (e) {
+        if (e.key === 'Escape') { e.preventDefault(); clearForumSearch(); }
+      });
+    }
+    var searchClear = byId('btn-forum-search-clear');
+    if (searchClear) searchClear.addEventListener('click', clearForumSearch);
+
     // 发帖按钮：打开发帖弹窗（登录后才可发）
     byId('btn-new-post').addEventListener('click', function () {
       if (!state.currentUser) { go('/login'); return; }

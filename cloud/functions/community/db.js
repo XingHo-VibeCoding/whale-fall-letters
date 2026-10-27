@@ -70,10 +70,25 @@ async function findUserById(id, baseUrl, apiKey) {
 
 // ---------------------------------------------------------------- 帖子
 
-/** 帖子列表，按发帖时间倒序。limit 不传 = 全部（当前数据量不需要分页）。 */
-async function fetchPosts(limit, baseUrl, apiKey) {
+/**
+ * 帖子列表，按发帖时间倒序。limit 不传 = 全部。
+ *
+ * Day 31：加了 q —— 按书名 / 书的作者 / 正文做**大小写不敏感**的模糊搜索。
+ *
+ * ⚠️ 搜索词必须清洗：PostgREST 的 or 语法里 `,` `(` `)` 是结构字符、`*` 是通配符。
+ *    用户搜 "三体(上)" 如果不处理，整个 or 条件会被解析坏，返回一堆莫名其妙的结果。
+ *    这里把结构字符换成空格 —— 宁可少匹配几个字，也不能让查询语法崩掉。
+ */
+async function fetchPosts(limit, baseUrl, apiKey, q) {
   const params = { select: "*", order: "createdAt.desc", is_deleted: "eq.false" };
   if (limit !== undefined) params.limit = String(limit);
+
+  const keyword = String(q || "").replace(/[(),*%]/g, " ").trim();
+  if (keyword) {
+    // ilike = 大小写不敏感；* 是 PostgREST 的通配符（等价于 SQL 的 %）
+    params.or = `(title.ilike.*${keyword}*,author.ilike.*${keyword}*,content.ilike.*${keyword}*)`;
+  }
+
   return getRows("posts", params, baseUrl, apiKey);
 }
 

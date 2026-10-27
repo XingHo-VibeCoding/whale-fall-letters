@@ -37,6 +37,7 @@ const COVER_MAX = 500;
 const POST_CONTENT_MAX = 5000;
 const COMMENT_CONTENT_MAX = 1000;
 const MESSAGE_MAX = 1000;          // 单条私信正文上限
+const SEARCH_MAX = 50;             // 搜索词上限（再长也没人这么搜，防滥用）
 
 const LIMIT_MAX = 100;
 const BODY_MAX_BYTES = 100 * 1024;
@@ -513,7 +514,16 @@ const server = http.createServer((req, res) => {
       limit = Math.min(n, LIMIT_MAX);
     }
 
-    db.fetchPosts(limit, baseUrl, apiKey)
+    // Day 31：q = 搜索关键词（书名 / 书的作者 / 正文，大小写不敏感）
+    const q = (url.searchParams.get("q") || "").trim();
+    if (q.length > SEARCH_MAX) {
+      fail(res, `搜索词太长了（最多 ${SEARCH_MAX} 字）`);
+      log("GET", "/api/posts", "400", "搜索词过长");
+      return;
+    }
+
+    return db
+      .fetchPosts(limit, baseUrl, apiKey, q)
       .then((rows) => {
         const ids = rows.map((r) => r.id);
         return Promise.all([
@@ -524,14 +534,13 @@ const server = http.createServer((req, res) => {
       })
       .then(([userMap, counts, rows]) => {
         const posts = rows.map((r) => shapePost(r, userMap, counts[r.id]));
-        log("GET", "/api/posts", "200", `返回 ${posts.length} 篇`);
-        send(res, { ok: true, data: { posts } });
+        log("GET", "/api/posts", "200", q ? `搜「${q}」命中 ${posts.length} 篇` : `返回 ${posts.length} 篇`);
+        send(res, { ok: true, data: { posts, query: q || "" } });
       })
       .catch((err) => {
         log("GET", "/api/posts", "500", err.message);
         fail(res, describeError(err));
       });
-    return;
   }
 
   // ---------- GET /api/posts/:id（详情 + 评论） ----------

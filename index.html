@@ -697,6 +697,15 @@
       <div class="box-head">
         <h3 class="box-title">最新讨论</h3>
       </div>
+
+      <!-- Day 31：论坛搜索。搜书名 / 书的作者 / 正文，由服务端做大小写不敏感的模糊匹配 -->
+      <div class="forum-search">
+        <input id="forum-search" type="search" autocomplete="off"
+               placeholder="搜书名、作者或帖子内容…" aria-label="搜索帖子">
+        <button id="btn-forum-search-clear" class="btn btn-ghost" type="button" hidden>清除</button>
+      </div>
+      <p id="forum-search-hint" class="muted forum-search-hint" hidden></p>
+
       <div id="post-list" class="post-list"></div>
       <p id="post-empty" class="muted">还没有帖子，来发第一篇吧。</p>
     </div>

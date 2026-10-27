@@ -1284,3 +1284,43 @@ select {
   outline: 2px solid var(--danger);
   outline-offset: 2px;
 }
+
+/* ============================================================
+ * 论坛搜索（Day 31）
+ * 放在「最新讨论」框里、帖子列表上方。样式跟着星海主题的变量走，
+ * 不写死颜色 —— 否则换主题时会变成一块突兀的白。
+ * ============================================================ */
+.forum-search {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin: 0 0 12px;
+}
+
+.forum-search input {
+  flex: 1 1 auto;
+  min-width: 0;              /* 窄屏时能被压缩，否则会把按钮挤出容器 */
+  padding: 8px 12px;
+  font: inherit;
+  color: var(--ink, #e8f1ff);
+  background: var(--panel-soft, rgba(255, 255, 255, 0.06));
+  border: 1px solid var(--line, rgba(255, 255, 255, 0.14));
+  border-radius: 10px;
+  outline: none;
+  transition: border-color 0.15s, box-shadow 0.15s;
+}
+
+.forum-search input::placeholder {
+  color: var(--ink-dim, rgba(232, 241, 255, 0.45));
+}
+
+/* 键盘用户必须能看见焦点在哪（preflight M2 那条人工检查就看这个） */
+.forum-search input:focus-visible {
+  border-color: var(--accent, #6fd6c8);
+  box-shadow: 0 0 0 3px rgba(111, 214, 200, 0.18);
+}
+
+.forum-search-hint {
+  margin: 0 0 10px;
+  font-size: 13px;
+}
