@@ -36,14 +36,19 @@ function restUrl(baseUrl, table, params) {
 // ---------------------------------------------------------------- 读
 
 /**
- * 按「小写账号名」查一个用户。没查到返回 null（**不是抛错** —— 查不到是正常情况）。
+ * 按「账号名」查一个用户。没查到返回 null（**不是抛错** —— 查不到是正常情况）。
+ *
+ * ⚠️ Day 30 改动：查的是 username 原文，不是 usernameLower。
+ *    PG 的 = 比较对大小写敏感，所以 ZJ122456 和 zj122456 是两个不同的账号，
+ *    登录必须一字不差。这是大帅明确要的行为（仿冒代价已知）。
+ *
  * 只查 usernameLower 一列不行，要整行：登录时要拿 salt 和 passwordHash 做比对。
  */
-async function findUserByUsernameLower(usernameLower, baseUrl, apiKey) {
+async function findUserByUsername(username, baseUrl, apiKey) {
   const resp = await fetch(
     restUrl(baseUrl, "users", {
       select: "*",
-      usernameLower: `eq.${usernameLower}`,
+      username: `eq.${username}`,
       limit: "1",
     }),
     { headers: headers(apiKey), signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }
@@ -146,7 +151,7 @@ async function deleteExpiredSessions(userId, nowIso, baseUrl, apiKey) {
 }
 
 module.exports = {
-  findUserByUsernameLower,
+  findUserByUsername,
   findUserById,
   findSession,
   insertUser,

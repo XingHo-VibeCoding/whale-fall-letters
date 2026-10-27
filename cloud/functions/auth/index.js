@@ -271,6 +271,8 @@ const server = http.createServer((req, res) => {
         }
 
         const username = String(body.username).trim();
+        // usernameLower 仍然写进库（留作记录），但**不再参与判重**：
+        // 判重和登录查人都按 username 原文精确比对，所以 ZJ122456 ≠ zj122456。
         const usernameLower = username.toLowerCase();
 
         let avatar = typeof body.avatar === "string" ? body.avatar : "";
@@ -282,10 +284,10 @@ const server = http.createServer((req, res) => {
         // 先查一次：只为给出友好提示（"这个名字被用了"）。
         // 真正防并发重复的是数据库唯一索引，不靠这次查询。
         return db
-          .findUserByUsernameLower(usernameLower, baseUrl, apiKey)
+          .findUserByUsername(username, baseUrl, apiKey)
           .then((existing) => {
             if (existing) {
-              log("POST", "/api/auth/register", "409", `账号名占用：${usernameLower}`);
+              log("POST", "/api/auth/register", "409", `账号名占用：${username}`);
               return fail(res, "该账号名已被使用，无法注册");
             }
 
@@ -355,10 +357,9 @@ const server = http.createServer((req, res) => {
         }
 
         const username = body.username.trim();
-        const usernameLower = username.toLowerCase();
 
         return db
-          .findUserByUsernameLower(usernameLower, baseUrl, apiKey)
+          .findUserByUsername(username, baseUrl, apiKey)
           .then((user) => {
             // ★ 铁律③：没这个账号 和 密码错了，回同一句话。
             // 分开说等于送一个「这个账号存不存在」的探测接口。
