@@ -766,6 +766,12 @@
     if (!el) return false;
     if (bannerTextEl) bannerTextEl.textContent = message;
     el.hidden = false;
+
+    // 关键：给页面底部让出等高的空间。
+    // 只把条往上挪没用——它还是会压住最下面那张卡；让出空间后内容能滚上来，
+    // 条是「多出来的一层」，不是「盖在上面的一层」。
+    reserveSpaceForBanner(el.offsetHeight + 26);
+
     if (bannerTimer) clearTimeout(bannerTimer);
     bannerTimer = setTimeout(hideSyncError, BANNER_MS);
     return true;
@@ -773,8 +779,34 @@
 
   function hideSyncError() {
     if (bannerEl) bannerEl.hidden = true;
+    reserveSpaceForBanner(0);
     if (bannerTimer) { clearTimeout(bannerTimer); bannerTimer = null; }
     return true;
+  }
+
+  /**
+   * 设/撤 body 的底部内边距。
+   * h = 0 表示撤掉（把原来的值还回去）。
+   *
+   * 为什么要存原值：有些页面本来就给 body 设了 padding-bottom，
+   * 直接覆盖会把它抹掉；收起时应该还原成原样，而不是清空。
+   */
+  var bodyPadBackup = null;
+
+  function reserveSpaceForBanner(h) {
+    if (!hasDom()) return;
+    var b = document.body;
+    if (!b || !b.style) return;
+
+    if (h > 0) {
+      if (bodyPadBackup === null) {
+        bodyPadBackup = b.style.paddingBottom || '';   // 记下原值（可能是空串）
+      }
+      b.style.paddingBottom = h + 'px';
+    } else if (bodyPadBackup !== null) {
+      b.style.paddingBottom = bodyPadBackup;
+      bodyPadBackup = null;
+    }
   }
 
   /**

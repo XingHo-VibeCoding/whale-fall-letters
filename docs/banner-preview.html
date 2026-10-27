@@ -7,7 +7,14 @@
 <!-- 引仓库里的真 styles.css，颜色/圆角/字号就是线上那份 -->
 <link rel="stylesheet" href="../styles.css">
 <style>
-  /* 只服务这一页，不进产品样式：说明区 + 按钮组 */
+  /* 只服务这一页，不进产品样式 */
+  .preview-note-bar {
+    position: sticky; top: 0; z-index: 60;
+    padding: 8px 14px;
+    background: #FAEEDA; color: #633806;
+    border-bottom: 1px solid #EF9F27;
+    font-size: 12px; line-height: 1.6; text-align: center;
+  }
   .preview-tools {
     margin: 26px 0 40px; padding: 14px;
     border: 1px dashed var(--line); border-radius: var(--radius);
@@ -20,29 +27,33 @@
 </head>
 <body>
 
-<!-- ===== 这一块是从 index.html 原样复制的真导航（顶部 sticky，不是底部） ===== -->
+<!-- 这一条是预览页自己的，告诉你哪部分是真的、哪部分是摆样子 -->
+<div class="preview-note-bar" id="note-bar">
+  <strong>样式预览页</strong>：导航按钮是摆样子，点了只切换高亮、不跳转
+</div>
+
+<!-- ===== 从 index.html 原样复制的真导航（顶部 sticky，本项目没有底部导航） ===== -->
 <header class="site-nav">
   <div class="site-nav-inner">
-    <a class="site-brand" href="#">
+    <a class="site-brand" href="#" id="brand">
       <span class="site-brand-mark">鲸</span>
       <span class="site-brand-text">鲸落书简</span>
     </a>
-    <nav class="site-nav-links">
-      <button class="site-nav-link is-active" type="button">首页</button>
-      <button class="site-nav-link" type="button">论坛</button>
-      <button class="site-nav-link" type="button">私信</button>
-      <button class="site-nav-link" type="button">我的</button>
-      <button class="site-nav-link" type="button">接口数据</button>
+    <nav class="site-nav-links" id="nav-links">
+      <button class="site-nav-link is-active" type="button" data-name="首页">首页</button>
+      <button class="site-nav-link" type="button" data-name="论坛">论坛</button>
+      <button class="site-nav-link" type="button" data-name="私信">私信</button>
+      <button class="site-nav-link" type="button" data-name="我的">我的</button>
+      <button class="site-nav-link" type="button" data-name="接口数据">接口数据</button>
     </nav>
     <div class="site-nav-auth">
-      <button class="btn btn-primary btn-sm" type="button">登录 / 注册</button>
+      <button class="btn btn-primary btn-sm" type="button" id="btn-login">登录 / 注册</button>
     </div>
   </div>
 </header>
 
 <div class="wrap">
   <section class="view">
-    <!-- 真类名的书单卡片，用来判断「底部提示条会不会压住最后一张卡」 -->
     <div class="book-list">
 
       <article class="book-card">
@@ -99,16 +110,16 @@
     </div>
   </section>
 
-  <!-- 说明与按钮：放在列表之后，所以打开首屏先看到的是「真页面 + 提示条」 -->
   <div class="preview-tools">
     <h2>怎么看这一页（滚到这儿说明你已经到底了）</h2>
     <p>
-      提示条在 <strong>1.2 秒后自动弹一次</strong>，贴在屏幕底部、列表最后一张卡上面。
-      要看的就两件事：<strong>它有没有压住最后一张卡片</strong>、<strong>圆角和字号跟页面搭不搭</strong>。
+      提示条 1.2 秒后自动弹一次。这一版改了一个地方：<strong>弹出时会给页面底部让出空间</strong>
+      （body 加等高 padding），所以它<strong>不再压住最后一张卡</strong>，内容能滚上来。
+      收起后空间自动撤掉。
     </p>
     <p>
-      顺带纠正一句：这个项目的导航在<strong>顶部</strong>（sticky，手机上折成两行），<strong>没有底部导航栏</strong>，
-      所以之前让你「看会不会挡住底部导航」是我说错了。
+      要看的还是两件事：<strong>最后一张卡能不能完整露出来</strong>、<strong>圆角和字号搭不搭</strong>。
+      点下面「弹超长书名」，条会变高，看它变高后还会不会挡。
     </p>
     <div class="row">
       <button type="button" class="btn btn-primary btn-sm" id="btn-show">再弹一次</button>
@@ -127,16 +138,34 @@
 <script>
   var liveBanner = document.getElementById('live-banner');
   var liveText = document.getElementById('live-text');
+  var noteBar = document.getElementById('note-bar');
+  var noteDefault = noteBar.innerHTML;
   var timer = null;
+  var padBackup = null;
+
+  /* 和 sync.js 里的 reserveSpaceForBanner 同一套逻辑：
+     弹出时把 body 底部让出「条高 + 26px」，收起时还原。 */
+  function reserve(h) {
+    var b = document.body;
+    if (h > 0) {
+      if (padBackup === null) padBackup = b.style.paddingBottom || '';
+      b.style.paddingBottom = h + 'px';
+    } else if (padBackup !== null) {
+      b.style.paddingBottom = padBackup;
+      padBackup = null;
+    }
+  }
 
   function show(msg) {
     liveText.textContent = msg;
     liveBanner.hidden = false;
+    reserve(liveBanner.offsetHeight + 26);
     if (timer) clearTimeout(timer);
     timer = setTimeout(hide, 12000);
   }
   function hide() {
     liveBanner.hidden = true;
+    reserve(0);
     if (timer) { clearTimeout(timer); timer = null; }
   }
 
@@ -149,7 +178,32 @@
     show('「添加《献给阿尔吉侬的花束（纪念版·全译注本）》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
   });
 
-  // 打开 1.2 秒后自动弹一次，不点按钮也能看见真实位置
+  /* 导航按钮：给个明确反馈，别让人以为页面卡死了。
+     点一下 → 高亮跟着走 + 顶部说明条写清「这里不跳转」。 */
+  function tell(text) {
+    noteBar.innerHTML = text;
+    setTimeout(function () { noteBar.innerHTML = noteDefault; }, 2600);
+  }
+
+  document.getElementById('nav-links').addEventListener('click', function (e) {
+    var btn = e.target.closest ? e.target.closest('.site-nav-link') : null;
+    if (!btn) return;
+    var links = this.querySelectorAll('.site-nav-link');
+    for (var i = 0; i < links.length; i++) links[i].classList.remove('is-active');
+    btn.classList.add('is-active');
+    tell('预览页不跳转 —— 你点了「<strong>' + btn.getAttribute('data-name') + '</strong>」');
+  });
+
+  document.getElementById('brand').addEventListener('click', function (e) {
+    e.preventDefault();
+    tell('预览页不跳转 —— 你点了<strong>站名</strong>');
+  });
+
+  document.getElementById('btn-login').addEventListener('click', function () {
+    tell('预览页不跳转 —— 你点了<strong>登录 / 注册</strong>');
+  });
+
+  // 打开 1.2 秒后自动弹一次，不用点按钮也能看见真实位置和让位效果
   setTimeout(function () {
     show('「添加《三体》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
   }, 1200);
