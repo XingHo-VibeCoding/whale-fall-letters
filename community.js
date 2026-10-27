@@ -60,29 +60,15 @@
     }
   ];
 
-  // 帖子（模拟 posts 表）
-  var MOCK_POSTS = [
-    {
-      id: 'post_1', authorId: 'user_1', title: '三体', author: '刘慈欣',
-      coverUrl: '', content: '读完第二遍了，黑暗森林法则越想越冷。你们觉得宇宙社会学成立吗？',
-      createdAt: '2026-09-30T10:00:00', comments: [
-        { id: 'c1', authorId: 'user_2', content: '成立，但那是零和博弈下的推演。', createdAt: '2026-09-30T10:20:00' },
-        { id: 'c2', authorId: 'user_3', content: '我更喜欢死神永生里的二向箔。', createdAt: '2026-09-30T11:05:00' }
-      ]
-    },
-    {
-      id: 'post_2', authorId: 'user_2', title: '明朝那些事儿', author: '当年明月',
-      coverUrl: '', content: '把历史写活了的典范，轻松又好读，适合入门。',
-      createdAt: '2026-09-29T21:00:00', comments: [
-        { id: 'c3', authorId: 'user_1', content: '确实，我三天看完了前三册。', createdAt: '2026-09-29T21:40:00' }
-      ]
-    },
-    {
-      id: 'post_3', authorId: 'user_3', title: '百年孤独', author: '加西亚·马尔克斯',
-      coverUrl: '', content: '人名太难记了，但读进去之后放不下。有人同感吗？',
-      createdAt: '2026-09-28T14:30:00', comments: []
-    }
-  ];
+  // 帖子缓存（Day 30 改造）
+  //
+  // 这里原来是一段写死的假数据（post_1/post_2/post_3 三篇），你发的评论只 push
+  // 进内存、刷新就没 —— 所以"别人能看到我的评论"从来没成立过。
+  // 现在它是个**空数组当缓存**，内容由 loadPosts() 从 GET /api/posts 填进来。
+  //
+  // 变量名故意没改：下面十几处读 MOCK_POSTS 的代码一行都不用动，
+  // 它们读到的仍然是 MOCK_POSTS，只是里面装的东西变成了数据库里的真帖子。
+  var MOCK_POSTS = [];
 
   // 全站收藏量（mock）。按「书名」存而不是按帖子 —— 同一本书有多个帖子时，
   // 收藏量必须是同一个数，不能各算各的。
@@ -136,7 +122,8 @@
     postFromBook: false,        // 帖子详情是从「同书列表」进来的吗
     lastBookTitle: null,        // 最近一次点热门书看的是哪本（返回时用）
     profileUserId: null,        // 正在看的个人主页属于谁（null=未打开）
-    authBusy: false             // 正在提交登录/注册（防连点重复提交）
+    authBusy: false,            // 正在提交登录/注册（防连点重复提交）
+    composeBusy: false          // 正在提交发帖（同上）
   };
 
   /* =============================================================
@@ -238,6 +225,44 @@
         clearToken();
       }
     );
+  }
+
+  /* =============================================================
+   * 1.2 帖子接口（Day 30 第二阶段）
+   *
+   * 两个函数，一个规则：**把接口回来的数据装进 MOCK_POSTS 缓存**。
+   * 装好之后所有渲染代码照旧读 MOCK_POSTS，它们不知道数据来自网络。
+   * ============================================================= */
+
+  /** 拉帖子列表，填满缓存。失败时缓存保持原样（不擦掉上次的内容）。 */
+  function loadPosts() {
+    return authRequest('GET', '/api/posts').then(function (data) {
+      var list = (data && data.posts) || [];
+      MOCK_POSTS.length = 0;
+      for (var i = 0; i < list.length; i++) {
+        MOCK_POSTS.push(list[i]);
+      }
+      return MOCK_POSTS;
+    });
+  }
+
+  /**
+   * 拉一篇帖子的详情（含评论），并把它合并进缓存。
+   * 详情里的 comments 比列表里的全，所以拉回来要覆盖缓存里那条。
+   */
+  function loadPostDetail(id) {
+    return authRequest('GET', '/api/posts/' + encodeURIComponent(id)).then(function (data) {
+      var post = data && data.post;
+      if (!post) throw new Error('这篇帖子不存在或已删除');
+      for (var i = 0; i < MOCK_POSTS.length; i++) {
+        if (MOCK_POSTS[i].id === post.id) {
+          MOCK_POSTS[i] = post;
+          return post;
+        }
+      }
+      MOCK_POSTS.push(post);   // 从别处直接打开详情（缓存里没有）
+      return post;
+    });
   }
 
   /* =============================================================
@@ -891,7 +916,9 @@
     meta.className = 'post-meta';
     var authorName = document.createElement('a');
     authorName.className = 'user-link';
-    authorName.textContent = usernameById(post.authorId);
+    // Day 30：后端已经把作者名拼好一起返回了（authorName）。
+    // 优先用它 —— 真注册用户的 id 是 user-mvqxxx，查 MOCK_USERS 那三个假人永远查不到。
+    authorName.textContent = post.authorName || usernameById(post.authorId);
     authorName.href = '#';
     (function (uid) {
       authorName.addEventListener('click', function (e) {
@@ -913,7 +940,12 @@
     foot.className = 'post-foot';
     var cc = document.createElement('span');
     cc.className = 'muted';
-    cc.textContent = '💬 ' + (post.comments ? post.comments.length : 0) + ' 条评论';
+    // Day 30：列表接口不返回评论数组，只给一个 commentCount 数字。
+    // 两条路都留着：有 commentCount 用它，没有就退回数 comments 数组。
+    var commentN = typeof post.commentCount === 'number'
+      ? post.commentCount
+      : (post.comments ? post.comments.length : 0);
+    cc.textContent = '💬 ' + commentN + ' 条评论';
     foot.appendChild(cc);
     body.appendChild(foot);
 
@@ -923,7 +955,18 @@
 
   function renderForum() {
     renderHot();
+    // 先用缓存画一遍（已有数据就不闪屏），随后异步拉最新的一遍再重画。
+    // 先画后拉，而不是"转圈等网络"：线上网络一旦慢，空屏比旧数据难看得多。
     renderPosts();
+    loadPosts().then(
+      function () { renderPosts(); },
+      function (e) {
+        // 拉不到：有缓存就继续显示旧的、不弹提示；一条都没有才说一声
+        if (MOCK_POSTS.length === 0) {
+          showError((e && e.message) || '帖子列表加载失败，请检查网络后重试');
+        }
+      }
+    );
   }
 
   // 打开发帖弹窗（清空上次残留）
@@ -938,7 +981,7 @@
     byId('modal-compose').hidden = false;
   }
 
-  // 提交发帖
+  // 提交发帖（Day 30：从「push 进内存数组」改成真调 POST /api/posts）
   function submitCompose() {
     var title = byId('compose-title-input').value.trim();
     var author = byId('compose-author').value.trim();
@@ -946,27 +989,46 @@
     var content = byId('compose-content').value.trim();
     var err = byId('compose-error');
 
+    if (!state.currentUser) { err.textContent = '请先登录再发帖'; err.hidden = false; return; }
     if (!title) { err.textContent = '书名不能为空'; err.hidden = false; return; }
     if (title.length > 100) { err.textContent = '书名太长（最多 100 字）'; err.hidden = false; return; }
     if (!content) { err.textContent = '感受 / 看法不能为空'; err.hidden = false; return; }
 
-    var post = {
-      id: 'post_' + Date.now(),
-      authorId: state.currentUser.id,   // 用真实 id，保证「我的」页聚合能查到
-      title: title,
-      author: author || '',
-      coverUrl: cover,
-      content: content,
-      createdAt: new Date().toISOString(),
-      comments: []
-    };
-    MOCK_POSTS.push(post);
+    if (state.composeBusy) return;     // 连点两下不该发两篇
+    state.composeBusy = true;
 
-    byId('modal-compose').hidden = true;
-    renderForum();
-    showSuccess('发布成功！');
-    // 直接打开刚发的帖子详情
-    openPost(post.id);
+    var btn = byId('btn-save-compose');
+    var oldText = btn ? btn.textContent : '';
+    if (btn) { btn.disabled = true; btn.textContent = '发布中…'; }
+    err.hidden = true;
+
+    function settle() {
+      state.composeBusy = false;
+      if (btn) { btn.disabled = false; btn.textContent = oldText; }
+    }
+
+    authRequest(
+      'POST',
+      '/api/posts',
+      { title: title, author: author, coverUrl: cover, content: content },
+      loadToken()
+    ).then(
+      function (data) {
+        settle();
+        byId('modal-compose').hidden = true;
+        showSuccess('发布成功！');
+        var postId = data && data.post && data.post.id;
+        // 刷新列表（论坛页上的帖子数、排序都要对），再打开刚发的这篇
+        renderForum();
+        if (postId) openPost(postId);
+      },
+      function (e) {
+        settle();
+        // 后端说的人话直接用（"书名不能为空"之类），不要在中间再包一层壳
+        err.textContent = (e && e.message) || '发布失败，请稍后重试';
+        err.hidden = false;
+      }
+    );
   }
 
   /* =============================================================
@@ -1042,14 +1104,36 @@
     go('/post/' + encodeURIComponent(id));
   }
 
-  // 渲染：只填内容，不切页面。帖子不存在时返回 false，由路由退回论坛。
+  // 渲染：只填内容，不切页面。
   // postFromBook（返回时回论坛还是回同书列表）由「从哪点进来」决定：
   // 论坛帖子流点进来是 false，同书列表点进来保持 true。
+  //
+  // Day 30：内容改成从接口拉。函数仍然**同步返回 true** ——
+  // 先让路由把页面切过去，内容由下面异步补进来；
+  // 真的不存在了（没缓存又拉不到）才自己退回论坛。
   function enterPost(id) {
-    var post = findPost(id);
-    if (!post) { showError('这篇帖子不存在或已删除'); return false; }
-    state.currentPostId = id;
-    renderPostDetail(post);
+    var cached = findPost(id);
+    if (cached) {
+      state.currentPostId = id;
+      renderPostDetail(cached);        // 有缓存先显示，页面不会空白等网络
+    }
+
+    // 不管有没有缓存都再拉一次：评论可能刚被别人更新过
+    loadPostDetail(id).then(
+      function (post) {
+        state.currentPostId = post.id;
+        renderPostDetail(post);
+      },
+      function (e) {
+        if (cached) return;            // 有缓存就继续看旧的，不打扰
+        // 没缓存又拉不到 = 这篇确实没了。退回论坛，并把原因带过去。
+        // skipClear 让路由别把这条错误擦掉（applyRoute 里那行 clearError）
+        skipClear = true;
+        go('/forum');
+        showError((e && e.message) || '这篇帖子不存在或已删除');
+      }
+    );
+
     return true;
   }
 
@@ -1077,7 +1161,7 @@
     author.appendChild(document.createTextNode('由 '));
     var authorLink = document.createElement('a');
     authorLink.className = 'user-link';
-    authorLink.textContent = usernameById(post.authorId);
+    authorLink.textContent = post.authorName || usernameById(post.authorId);
     authorLink.href = '#';
     (function (uid) {
       authorLink.addEventListener('click', function (e) {
@@ -1152,11 +1236,40 @@
     btn.disabled = !state.currentUser;
     btn.addEventListener('click', function () {
       if (!state.currentUser) { go('/login'); return; }
-      if (!ta.value.trim()) { showError('评论不能为空'); return; }
-      post.comments.push({ id: 'c' + Date.now(), authorId: state.currentUser.id, content: ta.value.trim(), createdAt: new Date().toISOString() });
-      ta.value = '';
-      renderPostDetail(post);
-      renderForum();
+      var text = ta.value.trim();
+      if (!text) { showError('评论不能为空'); return; }
+      if (btn.disabled) return;          // 处理中，连点无效
+
+      var oldLabel = btn.textContent;
+      btn.disabled = true;
+      btn.textContent = '发表中…';
+
+      function restore() {
+        btn.disabled = false;
+        btn.textContent = oldLabel;
+      }
+
+      // Day 30：真发到后端。成功后重新拉一次详情，而不是本地 push ——
+      // 本地 push 只能看到自己这一条，重新拉才能看到**别人同时发的**。
+      authRequest(
+        'POST',
+        '/api/posts/' + encodeURIComponent(post.id) + '/comments',
+        { content: text },
+        loadToken()
+      ).then(
+        function () {
+          ta.value = '';
+          restore();
+          return loadPostDetail(post.id).then(function (fresh) {
+            renderPostDetail(fresh);
+            renderPosts();              // 列表卡片上的评论数也要跟着变
+          });
+        },
+        function (e) {
+          restore();
+          showError((e && e.message) || '评论没发出去，请稍后重试');
+        }
+      );
     });
     editor.appendChild(btn);
     commentBox.appendChild(editor);
@@ -1654,7 +1767,7 @@
     head.className = 'comment-head';
     var name = document.createElement('a');
     name.className = 'comment-name user-link';
-    name.textContent = usernameById(c.authorId);
+    name.textContent = c.authorName || usernameById(c.authorId);
     name.href = '#';
     (function (uid) {
       name.addEventListener('click', function (e) {
@@ -3118,6 +3231,12 @@
     // Day 30：拿存着的 token 换「我是谁」（刷新不掉线就靠这一句）。
     // 异步的，所以它回来时页面已经画完了，函数内部会自己补一次重画。
     restoreSession();
+    // Day 30：帖子缓存预热。
+    // 论坛、同书列表、个人主页三处都读 MOCK_POSTS 这份缓存，
+    // 如果只在 renderForum 里拉，从书单页直接跳到 #/book-posts/某书 就会看到"没有讨论"。
+    // 这里先拉一次，三处的入口就都不用各自处理"缓存还没好"了。
+    // 失败静默：真正需要数据的地方（论坛页）自己会再拉一遍并提示。
+    loadPosts().then(null, function () {});
     // Day 20+：星海模块（守护鲸/图鉴/数据卡/今日一句/开场轻震）
     initStarSea();
     // 按地址栏的 hash 落到对应页面（Day 13）。
