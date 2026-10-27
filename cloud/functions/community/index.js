@@ -36,6 +36,7 @@ const BOOK_AUTHOR_MAX = 100; // 书的作者
 const COVER_MAX = 500;
 const POST_CONTENT_MAX = 5000;
 const COMMENT_CONTENT_MAX = 1000;
+const MESSAGE_MAX = 1000;          // 单条私信正文上限
 
 const LIMIT_MAX = 100;
 const BODY_MAX_BYTES = 100 * 1024;
@@ -149,6 +150,65 @@ function matchPostsPath(pathname) {
   return { error: "路径格式不对，正确写法：/api/posts 或 /api/posts/<id> 或 /api/posts/<id>/comments" };
 }
 
+/**
+ * 私信路由解析。返回：
+ *   { notMatched:true }        不是 /api/messages 开头
+ *   { list:true }              /api/messages
+ *   { peerId:'user-x' }        /api/messages/user-x
+ *   { error:'...' }            格式不对（有 error 就到此为止，绝不带着空 id 往下走）
+ */
+function matchMessagesPath(pathname) {
+  if (pathname === "/api/messages" || pathname === "/api/messages/") return { list: true };
+  if (!pathname.startsWith("/api/messages/")) return { notMatched: true };
+
+  const raw = pathname.slice("/api/messages/".length).replace(/\/$/, "");
+  if (raw === "") return { list: true };
+  if (raw.includes("/")) {
+    return { error: "路径格式不对，正确写法：/api/messages 或 /api/messages/<对方用户id>" };
+  }
+  let peerId;
+  try {
+    peerId = decodeURIComponent(raw);
+  } catch {
+    return { error: "用户 id 的编码格式不对" };
+  }
+  return { peerId };
+}
+
+/**
+ * 把「我参与的全部消息」按对方分组，拼成前端要的会话列表。
+ *
+ * 这一步是私信里最像"数据库活"的地方：表里只有一条条消息，
+ * 「有哪些会话、各自最后一句是什么、几条没读」全是这里算出来的。
+ */
+function shapeConversations(rows, meId, userMap) {
+  const byPeer = {};
+
+  for (const r of rows) {
+    // 对方是谁：自己发的看 toId，收到的看 fromId
+    const peer = r.fromId === meId ? r.toId : r.fromId;
+    if (!byPeer[peer]) byPeer[peer] = { peerId: peer, messages: [], unread: 0 };
+    byPeer[peer].messages.push(r);
+    // 未读只算「发给我的、还没读的」；我自己发的不算
+    if (r.toId === meId && !r.readAt) byPeer[peer].unread += 1;
+  }
+
+  const out = [];
+  for (const peer of Object.keys(byPeer)) {
+    const c = byPeer[peer];
+    // 会话内按时间正序（聊天记录顺序：早的在上）
+    c.messages.sort((a, b) => (String(a.createdAt) < String(b.createdAt) ? -1 : 1));
+    const u = userMap[peer] || {};
+    c.peerName = u.username || "读者";
+    c.peerAvatar = u.avatar || "";
+    c.lastAt = c.messages.length ? c.messages[c.messages.length - 1].createdAt : "";
+    out.push(c);
+  }
+  // 会话列表按"最后一条消息时间"倒序，最近的在上
+  out.sort((a, b) => (String(b.lastAt) < String(a.lastAt) ? -1 : 1));
+  return out;
+}
+
 /** 把数据库里的帖子行拼成前端要的形状（补上作者名和评论数）。 */
 function shapePost(row, userMap, commentCount) {
   const u = (userMap && userMap[row.authorId]) || {};
@@ -258,9 +318,164 @@ const server = http.createServer((req, res) => {
     return fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
   }
 
+  // ================ 私信（Day 30 第三阶段） ================
+  //
+  // 三个接口都要求登录 —— 私信天然是私密的，没有"公开看"的说法。
+  const msgPath = matchMessagesPath(url.pathname);
+
+  if (!msgPath.notMatched) {
+    if (msgPath.error) {
+      fail(res, msgPath.error);
+      log(req.method, url.pathname, "400", msgPath.error);
+      return;
+    }
+
+    // ---------- GET /api/messages（我的会话列表） ----------
+    if (req.method === "GET" && msgPath.list) {
+      return requireUser(req, baseUrl, apiKey).then((auth) => {
+        if (auth.error) {
+          log("GET", "/api/messages", "401", auth.error);
+          return fail(res, auth.error);
+        }
+        const me = auth.user.id;
+
+        return db
+          .fetchMessagesOfUser(me, baseUrl, apiKey)
+          .then((rows) => {
+            const peerIds = rows.map((r) => (r.fromId === me ? r.toId : r.fromId));
+            return db
+              .fetchUsersByIds(peerIds, baseUrl, apiKey)
+              .then((userMap) => {
+                const conversations = shapeConversations(rows, me, userMap);
+                const totalUnread = conversations.reduce((n, c) => n + c.unread, 0);
+                log("GET", "/api/messages", "200", `${conversations.length} 个会话，未读 ${totalUnread}`);
+                send(res, { ok: true, data: { conversations, totalUnread } });
+              });
+          })
+          .catch((err) => {
+            log("GET", "/api/messages", "500", err.message);
+            fail(res, describeError(err));
+          });
+      });
+    }
+
+    // ---------- GET /api/messages/:peerId（和某人的消息） ----------
+    if (req.method === "GET" && msgPath.peerId) {
+      return requireUser(req, baseUrl, apiKey).then((auth) => {
+        if (auth.error) {
+          log("GET", url.pathname, "401", auth.error);
+          return fail(res, auth.error);
+        }
+        const me = auth.user.id;
+        const peerId = msgPath.peerId;
+
+        return db.findUserById(peerId, baseUrl, apiKey).then((peer) => {
+          if (!peer) {
+            log("GET", url.pathname, "404", "对方不存在");
+            return fail(res, "这个用户不存在");
+          }
+          return db.fetchThread(me, peerId, baseUrl, apiKey).then((rows) => {
+            // ★ 打开会话就算读过了。GET 带副作用不"纯"，但这里值：
+            //   否则前端还得额外发一个请求，而那一步失败就会被当成"聊天没加载出来"。
+            //   失败不影响消息本身返回，所以 catch 掉。
+            return db
+              .markThreadRead(me, peerId, isoNow(), baseUrl, apiKey)
+              .catch(() => 0)
+              .then((markedRead) => {
+                log("GET", url.pathname, "200", `${rows.length} 条消息，标记已读 ${markedRead}`);
+                send(res, {
+                  ok: true,
+                  data: {
+                    peer: { id: peer.id, username: peer.username, avatar: peer.avatar || "" },
+                    messages: rows,
+                    markedRead,
+                  },
+                });
+              });
+          });
+        }).catch((err) => {
+          log("GET", url.pathname, "500", err.message);
+          fail(res, describeError(err));
+        });
+      });
+    }
+
+    // ---------- POST /api/messages/:peerId（发消息） ----------
+    if (req.method === "POST" && msgPath.peerId) {
+      return readBody(req)
+        .then((raw) => {
+          const { body, error: jsonErr } = parseJson(raw);
+          if (jsonErr) {
+            log("POST", url.pathname, "400", jsonErr);
+            return fail(res, jsonErr);
+          }
+          if (typeof body.content !== "string" || body.content.trim() === "") {
+            log("POST", url.pathname, "400", "消息为空");
+            return fail(res, "消息不能为空");
+          }
+          const content = body.content.trim();
+          if (content.length > MESSAGE_MAX) {
+            log("POST", url.pathname, "400", "消息太长");
+            return fail(res, `消息太长了（最多 ${MESSAGE_MAX} 字）`);
+          }
+
+          return requireUser(req, baseUrl, apiKey).then((auth) => {
+            if (auth.error) {
+              log("POST", url.pathname, "401", auth.error);
+              return fail(res, auth.error);
+            }
+            const me = auth.user.id;
+            const peerId = msgPath.peerId;
+
+            if (me === peerId) {
+              log("POST", url.pathname, "400", "发给自己");
+              return fail(res, "不能给自己发私信");
+            }
+
+            return db.findUserById(peerId, baseUrl, apiKey).then((peer) => {
+              if (!peer) {
+                log("POST", url.pathname, "404", "收件人不存在");
+                return fail(res, "这个用户不存在");
+              }
+              const row = {
+                id: newId("msg"),
+                fromId: me,          // ★ 只认 token 里的人
+                toId: peer.id,
+                content,
+                createdAt: isoNow(),
+                readAt: null,        // 刚发出，对方还没读
+                is_deleted: false,
+              };
+              return db
+                .insertMessage(row, baseUrl, apiKey)
+                .then(() => {
+                  log("POST", url.pathname, "200", `新消息 ${row.id} → ${peer.id}`);
+                  send(res, { ok: true, data: { message: row } });
+                })
+                .catch((err) => {
+                  log("POST", url.pathname, "500", err.message);
+                  fail(res, `发送失败：${describeError(err)}`);
+                });
+            });
+          });
+        })
+        .catch((err) => {
+          log("POST", url.pathname, "400", err.message);
+          fail(res, err.message === "请求体太大" ? "请求体太大，请减小内容后重试" : "读取请求失败");
+        });
+    }
+
+    fail(res, `不支持的请求：${req.method} ${url.pathname}`);
+    log(req.method, url.pathname, "405", "方法不支持");
+    return;
+  }
+
   const m = matchPostsPath(url.pathname);
   if (m.notMatched) {
-    fail(res, "未知路径，本服务提供 GET/POST /api/posts 与 GET /api/posts/:id、POST /api/posts/:id/comments");
+    fail(
+      res,
+      "未知路径，本服务提供 GET/POST /api/posts、GET /api/posts/:id、POST /api/posts/:id/comments、GET/POST /api/messages、GET /api/messages/:peerId"
+    );
     log(req.method, url.pathname, "404", "未知路径");
     return;
   }

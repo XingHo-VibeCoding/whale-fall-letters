@@ -86,27 +86,16 @@
     'c3': 8
   };
 
-  // 私信会话（模拟 conversations / messages）
-  // unread: true = 对方发来的、我还没读的那条。
-  // 「我读过了没有」不写在这里 —— 它存在本机（Store 的 reading:conv-reads），
-  // 所以刷新页面之后已读状态还在。
-  var MOCK_CONVERSATIONS = [
-    {
-      id: 'conv_1', peerId: 'user_2', peerName: '小林',
-      messages: [
-        { fromId: 'user_2', content: '你也喜欢三体啊！', createdAt: '2026-09-30T11:00:00' },
-        { fromId: 'me', content: '是啊，刚看完第二部。', createdAt: '2026-09-30T11:02:00' },
-        { fromId: 'user_2', content: '要不要聊聊黑暗森林？', createdAt: '2026-09-30T11:03:00', unread: true }
-      ]
-    },
-    {
-      id: 'conv_2', peerId: 'user_3', peerName: '月白',
-      messages: [
-        { fromId: 'me', content: '你那本《百年孤独》看完了吗？', createdAt: '2026-09-30T14:20:00' },
-        { fromId: 'user_3', content: '刚看完，结尾那阵风一来，我整个人都愣住了。', createdAt: '2026-09-30T14:22:00', unread: true }
-      ]
-    }
-  ];
+  // 私信会话缓存（Day 30 第三阶段）
+  //
+  // 这里原来是两段写死的假对话（跟'小林''月白'两个不存在的人）。
+  // 现在它是个空数组当缓存，由 loadConversations() 从 GET /api/messages 填进来。
+  //
+  // 结构保持老样子不变 —— 下面的渲染代码一行都不用改：
+  //   { id（= peerId）, peerId, peerName, messages: [{ fromId, content, createdAt, unread }] }
+  // 其中 fromId 被归一化成 'me'（自己发的）或 peerId（对方发的），
+  // 因为老代码里到处用 `m.fromId !== 'me'` 判断"这条是不是我发的"。
+  var MOCK_CONVERSATIONS = [];
 
   // 运行期状态
   var state = {
@@ -213,6 +202,8 @@
         state.avatarColor = null;
         state.avatarImage = null;
         updateNavUser();
+        // 自动登录成功也要拉一次私信，否则刷新后红点数丢失
+        loadConversations().then(renderNavBadge, function () {});
         // 登录态变了，正在看的那页要重画（导航、"我的"页、个人主页都受影响）。
         // 参数 true = 启动阶段，不擦掉 app.js 设的全局告警（Day 12 修过的 bug）
         var h = (window.location.hash || '').replace(/^#/, '');
@@ -283,6 +274,84 @@
       userCache[id] = u;
       return u;
     });
+  }
+
+  /* ------------------------------------------------ 私信（Day 30 第三阶段） */
+
+  /**
+   * 把后端的一条会话转成前端的老形状。
+   * 关键一步：fromId 归一化成 'me'（我发的）或 peerId（对方发的）——
+   * 老渲染代码到处用 `m.fromId !== 'me'` 判断"这条是不是我发的"，
+   * 后端返回的是真实 userId，不归一化的话所有消息都会被当成对方发的。
+   */
+  function normalizeConversation(c, meId) {
+    var msgs = [];
+    var raw = (c && c.messages) || [];
+    for (var i = 0; i < raw.length; i++) {
+      var m = raw[i];
+      msgs.push({
+        id: m.id,
+        fromId: m.fromId === meId ? 'me' : c.peerId,
+        content: m.content,
+        createdAt: m.createdAt,
+        // 未读 = 发给我的、且 readAt 还是空
+        unread: m.toId === meId && !m.readAt
+      });
+    }
+    return { id: c.peerId, peerId: c.peerId, peerName: c.peerName, messages: msgs };
+  }
+
+  /** 拉我的会话列表，填满缓存。未登录直接空（没登录就不可能收到私信）。 */
+  function loadConversations() {
+    if (!state.currentUser) {
+      MOCK_CONVERSATIONS.length = 0;
+      return Promise.resolve(MOCK_CONVERSATIONS);
+    }
+    var meId = state.currentUser.id;
+    return authRequest('GET', '/api/messages', undefined, loadToken()).then(function (data) {
+      var list = (data && data.conversations) || [];
+      MOCK_CONVERSATIONS.length = 0;
+      for (var i = 0; i < list.length; i++) {
+        MOCK_CONVERSATIONS.push(normalizeConversation(list[i], meId));
+      }
+      return MOCK_CONVERSATIONS;
+    });
+  }
+
+  /**
+   * 拉「我和某个人」的完整对话，并合并进缓存。
+   * 这个 GET 在后端会顺手把对方发来的未读标成已读 —— 所以拉完要刷新未读徽标。
+   */
+  function loadThread(peerId) {
+    if (!state.currentUser) return Promise.reject(new Error('请先登录'));
+    var meId = state.currentUser.id;
+    return authRequest('GET', '/api/messages/' + encodeURIComponent(peerId), undefined, loadToken())
+      .then(function (data) {
+        var conv = normalizeConversation(
+          {
+            peerId: peerId,
+            peerName: data && data.peer ? data.peer.username : '',
+            messages: (data && data.messages) || []
+          },
+          meId
+        );
+        var hit = -1;
+        for (var i = 0; i < MOCK_CONVERSATIONS.length; i++) {
+          if (MOCK_CONVERSATIONS[i].peerId === peerId) { hit = i; break; }
+        }
+        if (hit >= 0) MOCK_CONVERSATIONS[hit] = conv;
+        else MOCK_CONVERSATIONS.unshift(conv);   // 第一次聊：直接放到最前面
+        return conv;
+      });
+  }
+
+  /**
+   * ★ 换账号 / 退出时清掉跟"人"有关的缓存。
+   * 不清的后果很具体：A 退出、B 登录，B 会在私信页看到 A 的对话 —— 那是真实的数据泄露。
+   * 会话是私密的，公开资料（userCache）不用清。
+   */
+  function clearUserScopedCache() {
+    MOCK_CONVERSATIONS.length = 0;
   }
 
   /* =============================================================
@@ -1846,22 +1915,25 @@
    *   - 导航栏「私信」上的数字 = 所有会话未读数之和；没登录就不显示。
    * ============================================================= */
 
-  // 本机记的「已读会话 id」。读不出来（存储被禁 / 数据损坏）就当空 = 全部未读：
-  // 界面照常能用，只是刷新后红点会回来。
+  // Day 30：本机记已读的那套（reading:conv-reads）已经废掉了。
+  // 现在「读没读过」由服务端 messages.readAt 说了算，两边都记只会打架。
+  // 这里留一个空实现，是因为 store.js 里那几个方法还在（别的地方可能引用），
+  // 但私信渲染已经不再读它了。
   function readConvIds() {
-    if (typeof Store === 'undefined' || !Store || typeof Store.listReads !== 'function') return [];
-    var res = Store.listReads();
-    return (res && res.ok && res.data) ? res.data : [];
+    return [];
   }
 
-  function isConvRead(convId) {
-    return readConvIds().indexOf(convId) >= 0;
+  function isConvRead() {
+    return false;
   }
 
-  // 一个会话的未读条数：读过的算 0；否则数对方发来的、标了 unread 的消息。
+  // 一个会话的未读条数：数对方发来的、标了 unread 的消息。
   // 自己发的不算未读 —— 那是自己打的字。
+  //
+  // Day 30 改动：不再查本机的 reading:conv-reads。
+  // 「读没读过」现在是**服务端的事**（messages.readAt），后端说未读才是未读。
+  // 两边都记会打架：本机说读过、服务端说没读，刷新后又变回去。
   function unreadCountOf(conv) {
-    if (isConvRead(conv.id)) return 0;
     var n = 0;
     for (var i = 0; i < conv.messages.length; i++) {
       if (conv.messages[i].fromId !== 'me' && conv.messages[i].unread) n++;
@@ -1899,19 +1971,19 @@
     badge.setAttribute('aria-label', '未读私信 ' + n + ' 条');
   }
 
-  // 把一个会话标记为已读：清掉内存里的未读标记，并写进本机记录。
-  // 返回 Store 的结果；写盘失败时界面照样算已读（否则人会以为没点上）。
+  // 把一个会话在本地标成已读（界面立刻不显示红点）。
+  // 真正的「已读」由后端负责：打开会话时那个 GET 会把对方发来的消息标上 readAt。
+  // 这里只同步内存，好让界面在请求回来之前就给出反馈。
   function markConvRead(conv) {
     for (var i = 0; i < conv.messages.length; i++) {
       conv.messages[i].unread = false;
     }
-    if (typeof Store === 'undefined' || !Store || typeof Store.markRead !== 'function') {
-      return { ok: false, error: '本机存储不可用' };
-    }
-    return Store.markRead(conv.id);
+    renderNavBadge();
+    return { ok: true };
   }
 
-  function renderConversations() {
+  // 只负责把缓存画到页面上（同步、不碰网络）
+  function paintConversations() {
     var list = byId('conversation-list');
     var empty = byId('conversation-empty');
     list.textContent = '';
@@ -1931,6 +2003,26 @@
     for (var i = 0; i < MOCK_CONVERSATIONS.length; i++) {
       list.appendChild(buildConversationItem(MOCK_CONVERSATIONS[i]));
     }
+  }
+
+  // 入口：先画缓存（不闪空屏），再异步拉最新的一遍
+  function renderConversations() {
+    paintConversations();
+    if (!state.currentUser) return;
+
+    loadConversations().then(
+      function () {
+        // 拉的过程中用户可能已经点进某个会话了，那就别把列表盖回去
+        if (state.currentConvId) return;
+        paintConversations();
+        renderNavBadge();
+      },
+      function (e) {
+        if (MOCK_CONVERSATIONS.length === 0) {
+          showError((e && e.message) || '私信列表加载失败，请检查网络后重试');
+        }
+      }
+    );
   }
 
   function buildConversationItem(conv) {
@@ -2000,50 +2092,62 @@
   // 所以这里只记下「进去后要展开哪一条」，渲染交给 enterMessages。
   function openConversation(id) {
     var conv = findConversation(id);
-    if (!conv) return;
+    if (conv) {
+      // 防重复：这一项正在处理中，连点不生效
+      var row = document.querySelector('.conversation-item[data-id="' + id + '"]');
+      if (row && row.classList.contains('is-busy')) return;
+      if (row) row.classList.add('is-busy');
 
-    // 防重复：这一项正在处理中，连点不生效
-    var row = document.querySelector('.conversation-item[data-id="' + id + '"]');
-    if (row && row.classList.contains('is-busy')) return;
-    if (row) row.classList.add('is-busy');
-
-    state.currentConvId = id;
-    state.openConvOnEnter = true;
-
-    var res = markConvRead(conv);   // 打开会话 = 已读
-    renderNavBadge();
-    go('/messages');                // 已在私信页则原地重放，不在就跳过来
-
-    // 界面这时已经变成已读了；只有写盘失败才需要补一句提醒 ——
-    // 这一次管用，但刷新之后红点会回来。
-    if (!res || !res.ok) {
-      showError('已读状态没能存到本机：刷新页面后这个会话可能又显示未读。');
+      state.currentConvId = id;
+      state.openConvOnEnter = true;
+      markConvRead(conv);    // 界面立刻变已读；真正的已读由 openThread 里的请求完成
+      go('/messages');       // 已在私信页则原地重放，不在就跳过来
+      return;
     }
+
+    // 缓存里没有这段对话（比如换设备登录后刚收到私信）→ 先去服务端拉
+    if (!state.currentUser) { go('/login'); return; }
+    loadThread(id).then(
+      function (c) {
+        state.currentConvId = c.id;
+        state.openConvOnEnter = true;
+        go('/messages');
+      },
+      function (e) {
+        showError((e && e.message) || '打不开这个会话');
+      }
+    );
   }
 
-  // 找到（或新建）与某个用户的一对一会话，返回会话对象
-  function getOrCreateConversation(peerId, peerName) {
-    for (var i = 0; i < MOCK_CONVERSATIONS.length; i++) {
-      if (MOCK_CONVERSATIONS[i].peerId === peerId) return MOCK_CONVERSATIONS[i];
-    }
-    var conv = { id: 'conv_' + Date.now(), peerId: peerId, peerName: peerName, messages: [] };
-    MOCK_CONVERSATIONS.unshift(conv);
-    return conv;
-  }
+  // Day 30：会话不再在本地"新建"。缓存里没有这段对话时，由 loadThread() 去服务端拉。
+  // （老版本这里是 getOrCreateConversation，凭空造一个 id 为 conv_时间戳 的空会话，
+  //   那个 id 服务端根本不认识，一刷新就没了。）
 
-  // 从任意入口发起私信：找到/新建会话并打开对话窗口
+  // 从任意入口发起私信：找到会话并打开对话窗口
   function openChatWith(peerId, peerName) {
     if (!state.currentUser) { go('/login'); return; }
     if (state.currentUser.id === peerId) { showError('不能给自己发私信'); return; }
-    var conv = getOrCreateConversation(peerId, peerName);
-    state.currentConvId = conv.id;
-    state.openConvOnEnter = true;
-    var res = markConvRead(conv);   // 打开会话 = 已读
-    renderNavBadge();
-    go('/messages');
-    if (!res || !res.ok) {
-      showError('已读状态没能存到本机：刷新页面后这个会话可能又显示未读。');
+
+    var conv = findConversation(peerId);
+    if (conv) {
+      state.currentConvId = conv.id;
+      state.openConvOnEnter = true;
+      markConvRead(conv);
+      go('/messages');
+      return;
     }
+
+    // 第一次和 TA 说话：让服务端把这段对话拉出来（空对话也能正常展开）
+    loadThread(peerId).then(
+      function (c) {
+        state.currentConvId = c.id;
+        state.openConvOnEnter = true;
+        go('/messages');
+      },
+      function (e) {
+        showError((e && e.message) || '打不开和 TA 的会话');
+      }
+    );
   }
 
   // 渲染：进私信页。默认显示会话列表；
@@ -2052,9 +2156,26 @@
     var conv = null;
     if (state.openConvOnEnter && state.currentConvId) conv = findConversation(state.currentConvId);
     state.openConvOnEnter = false;
-    if (conv) { renderChat(conv); return; }
+    if (conv) { openThread(conv); return; }
     state.currentConvId = null;
     renderConversations();
+  }
+
+  /**
+   * 展开一段对话：先画缓存里的（立刻有东西看），再去拉最新的。
+   * 拉回来时如果用户已经切走了，就不重画 —— 否则会在别人的会话里闪出这段对话。
+   */
+  function openThread(conv) {
+    renderChat(conv);
+    if (!state.currentUser) return;
+    loadThread(conv.peerId).then(
+      function (fresh) {
+        if (state.currentConvId !== fresh.id) return;   // 已经切走了
+        renderChat(fresh);
+        renderNavBadge();                                // 后端标了已读，红点要跟着变
+      },
+      function () { /* 拉不到就继续看缓存，不打断 */ }
+    );
   }
 
   function renderChat(conv) {
@@ -2100,10 +2221,41 @@
     send.className = 'btn btn-primary';
     send.textContent = '发送';
     function doSend() {
-      if (!ta.value.trim()) return;
-      conv.messages.push({ fromId: 'me', content: ta.value.trim(), createdAt: new Date().toISOString() });
-      ta.value = '';
-      renderChat(conv);
+      var text = ta.value.trim();
+      if (!text) return;
+      if (send.disabled) return;                 // 正在发，连点无效
+
+      var oldLabel = send.textContent;
+      send.disabled = true;
+      send.textContent = '发送中…';
+      function restore() {
+        send.disabled = false;
+        send.textContent = oldLabel;
+      }
+
+      // Day 30：真发到后端。成功后重新拉这整段对话，
+      // 而不是本地 push 一条 —— 本地 push 只是"看起来发出去了"，
+      // 重拉才能确认对方那边真的收到了，也才能拿到服务端的消息 id 和时间。
+      authRequest(
+        'POST',
+        '/api/messages/' + encodeURIComponent(conv.peerId),
+        { content: text },
+        loadToken()
+      ).then(
+        function () {
+          ta.value = '';
+          restore();
+          return loadThread(conv.peerId).then(function (fresh) {
+            renderChat(fresh);
+            renderNavBadge();
+            paintConversations();   // 列表上的"最后一句"也要跟着变
+          });
+        },
+        function (e) {
+          restore();
+          showError((e && e.message) || '消息没发出去，请稍后重试');
+        }
+      );
     }
     send.addEventListener('click', doSend);
     ta.addEventListener('keydown', function (e) {
@@ -2237,6 +2389,7 @@
           throw new Error('服务器没返回登录凭证，请稍后重试');
         }
         saveToken(data.token);          // 存起来，刷新后靠它自动登录
+        clearUserScopedCache();         // ★ 换账号前先清私信缓存，别把上一个人的对话留给下一个人
         state.currentUser = data.user;
         // 重置头像选择状态，避免下次注册残留
         state.avatarColor = null;
@@ -2245,6 +2398,8 @@
         clearError();
         clearSuccess();
         updateNavUser();
+        // 登录后拉一次私信，导航栏红点才有数（不拉的话永远显示 0）
+        loadConversations().then(renderNavBadge, function () {});
         settle();
         go('/');
         showSuccess((isRegister ? '注册成功，欢迎 ' : '欢迎回来，') + data.user.username + '！');
@@ -2437,6 +2592,7 @@
         // 先从界面上退出来（不等网络），再顺手通知后端删会话。
         // 顺序不能反：网络卡住时用户点"退出"却半天没反应，比退得慢更难受。
         state.currentUser = null;
+        clearUserScopedCache();         // ★ 退出即清私信缓存
         clearToken();
         updateNavUser();
         go('/');

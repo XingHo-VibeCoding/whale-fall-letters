@@ -147,6 +147,79 @@ async function fetchUsersByIds(ids, baseUrl, apiKey) {
   return out;
 }
 
+// ---------------------------------------------------------------- 私信
+
+/**
+ * 查「跟我有关的所有消息」（我发的 + 我收的），按时间**倒序**。
+ * 会话列表就是拿这批消息按对方分组的 —— 所以不建会话表，会话是算出来的。
+ *
+ * PostgREST 的 or 语法：or=(fromId.eq.x,toId.eq.x) → WHERE fromId='x' OR toId='x'
+ */
+async function fetchMessagesOfUser(userId, baseUrl, apiKey) {
+  if (!userId) throw new Error("fetchMessagesOfUser 缺少 userId，已中止");
+  return getRows(
+    "messages",
+    {
+      select: "*",
+      or: `(fromId.eq.${userId},toId.eq.${userId})`,
+      order: "createdAt.desc",
+      is_deleted: "eq.false",
+    },
+    baseUrl,
+    apiKey
+  );
+}
+
+/**
+ * 查两个**特定的人**之间的全部消息，按时间正序（聊天记录顺序）。
+ * or=(and(fromId.eq.a,toId.eq.b),and(fromId.eq.b,toId.eq.a))
+ * —— 少写任何一个 and，都会把"我跟所有人的消息"拉出来。
+ */
+async function fetchThread(meId, peerId, baseUrl, apiKey) {
+  if (!meId || !peerId) throw new Error("fetchThread 缺少 id，已中止");
+  return getRows(
+    "messages",
+    {
+      select: "*",
+      or: `(and(fromId.eq.${meId},toId.eq.${peerId}),and(fromId.eq.${peerId},toId.eq.${meId}))`,
+      order: "createdAt.asc",
+      is_deleted: "eq.false",
+    },
+    baseUrl,
+    apiKey
+  );
+}
+
+async function insertMessage(row, baseUrl, apiKey) {
+  await insertRow("messages", row, baseUrl, apiKey);
+}
+
+/**
+ * 把「对方发给我的、还没读的」全部标成已读，返回真实更新了几条。
+ *
+ * ⚠️ 条件里三个筛选同时存在（toId / fromId / readAt is null），
+ *    少了任何一个都会误伤：只按 toId 更新 = 把我所有会话都标已读。
+ */
+async function markThreadRead(meId, peerId, nowIso, baseUrl, apiKey) {
+  if (!meId || !peerId) throw new Error("markThreadRead 缺少 id，已中止");
+
+  const params = new URLSearchParams({
+    toId: `eq.${meId}`,
+    fromId: `eq.${peerId}`,
+    readAt: "is.null",
+    is_deleted: "eq.false",
+  });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/messages?${params}`, {
+    method: "PATCH",
+    headers: { ...headers(apiKey, true), Prefer: "return=representation" },
+    body: JSON.stringify({ readAt: nowIso }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 module.exports = {
   findSessionByToken,
   findUserById,
@@ -157,4 +230,8 @@ module.exports = {
   insertComment,
   countCommentsByPostIds,
   fetchUsersByIds,
+  fetchMessagesOfUser,
+  fetchThread,
+  insertMessage,
+  markThreadRead,
 };
