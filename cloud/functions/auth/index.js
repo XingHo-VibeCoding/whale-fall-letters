@@ -440,6 +440,49 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ---------- GET /api/auth/users/:id（查任意用户的公开资料） ----------
+  //
+  // 为什么放在 auth 函数而不是新开一个：
+  //   路径前缀决定网关路由，多一条路由就多一次控制台操作、多一个出错点。
+  //   查用户资料本来就属于"账号"这件事，放在这里语义也说得通。
+  //
+  // ★ 这是个**公开接口**（不需要 token）：点头像看别人主页不该要求登录。
+  //   但它只返回 pickPublicUser 挑出来的五列 —— passwordHash / salt 一个字节都出不去。
+  if (req.method === "GET" && url.pathname.startsWith("/api/auth/users/")) {
+    const raw = url.pathname.slice("/api/auth/users/".length).replace(/\/$/, "");
+    if (raw === "") {
+      log("GET", url.pathname, "400", "用户 id 为空");
+      return fail(res, "用户 id 不能为空，正确写法：/api/auth/users/user-xxxx");
+    }
+    if (raw.includes("/")) {
+      log("GET", url.pathname, "400", "用户 id 含斜杠");
+      return fail(res, "用户 id 格式不对，不应该包含斜杠");
+    }
+
+    let userId;
+    try {
+      userId = decodeURIComponent(raw);
+    } catch {
+      log("GET", url.pathname, "400", "id 编码格式不对");
+      return fail(res, "用户 id 的编码格式不对");
+    }
+
+    db.findUserById(userId, baseUrl, apiKey)
+      .then((user) => {
+        if (!user) {
+          log("GET", url.pathname, "404", "用户不存在");
+          return fail(res, "这个用户不存在");
+        }
+        log("GET", url.pathname, "200", `查到 ${user.id}`);
+        send(res, { ok: true, data: { user: pickPublicUser(user) } });
+      })
+      .catch((err) => {
+        log("GET", url.pathname, "500", err.message);
+        fail(res, describeError(err));
+      });
+    return;
+  }
+
   // ---------- POST /api/auth/logout ----------
   if (req.method === "POST" && url.pathname === "/api/auth/logout") {
     const token = readBearer(req);

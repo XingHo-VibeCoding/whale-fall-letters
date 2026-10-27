@@ -265,6 +265,26 @@
     });
   }
 
+  /**
+   * 用户资料缓存（id → { id, username, avatar, bio, createdAt }）。
+   *
+   * 为什么要这个：点帖子/评论里的作者名会进个人主页，而那个人可能是
+   * 任何一个真注册用户（user-mvqxxx）——他不在 MOCK_USERS 那三个假人里。
+   * 以前这里直接报"这个用户不存在"，就是因为没有地方可查。
+   */
+  var userCache = {};
+
+  /** 拉一个用户的公开资料（不带 token 也能拉，点头像看主页不该要求登录）。 */
+  function loadUser(id) {
+    if (userCache[id]) return Promise.resolve(userCache[id]);
+    return authRequest('GET', '/api/auth/users/' + encodeURIComponent(id)).then(function (data) {
+      var u = data && data.user;
+      if (!u) throw new Error('这个用户不存在');
+      userCache[id] = u;
+      return u;
+    });
+  }
+
   /* =============================================================
    * 1. 小工具
    * ============================================================= */
@@ -301,6 +321,8 @@
   function userById(id) {
     if (id === 'me') return state.currentUser;
     if (state.currentUser && state.currentUser.id === id) return state.currentUser;
+    // Day 30：真注册用户（user-mvqxxx）从接口拉回来的资料缓存在这
+    if (userCache[id]) return userCache[id];
     for (var i = 0; i < MOCK_USERS.length; i++) {
       if (MOCK_USERS[i].id === id) return MOCK_USERS[i];
     }
@@ -2527,11 +2549,31 @@
   }
 
   // 渲染：只填内容，不切页面
+  // Day 30：这个人可能是真注册用户 —— 本地没缓存时先去接口拉，拉回来再画。
+  // 同步返回 true，让路由先把页面切过去；真的查不到才退回论坛。
   function enterProfile(userId) {
     var user = userById(userId);
-    if (!user) { showError('这个用户不存在'); return false; }
-    state.profileUserId = userId;
-    renderProfile(user);
+    if (user) {
+      state.profileUserId = userId;
+      renderProfile(user);
+      return true;
+    }
+
+    // 页面上还留着上一个人的主页，先清掉，免得看到"别人的内容"闪一下
+    var box = byId('profile-content');
+    if (box) box.textContent = '';
+
+    loadUser(userId).then(
+      function (u) {
+        state.profileUserId = u.id;
+        renderProfile(u);
+      },
+      function (e) {
+        skipClear = true;      // 别让路由把这句提示擦掉
+        go('/forum');
+        showError((e && e.message) || '这个用户不存在');
+      }
+    );
     return true;
   }
 
