@@ -40,6 +40,14 @@
   var KEY_BOOKS = 'reading:books';
   var KEY_NOTES = 'reading:notes';
 
+  // Day 31：书单归属到人之后，同步请求必须带登录凭证。
+  // 这个键与 community.js 用的是同一个（reading:token），登录一次两边通用。
+  var KEY_TOKEN = 'reading:token';
+
+  function readToken() {
+    try { return global.localStorage.getItem(KEY_TOKEN) || ''; } catch (e) { return ''; }
+  }
+
   // 接口基地址。允许外部覆盖，方便本地联调和以后换域名。
   // 注意用 service 域名：带地域段的那个时好时坏（Day 19/20 记录）。
   var API_BASE = typeof global.__SYNC_API_BASE__ === 'string' && global.__SYNC_API_BASE__
@@ -96,6 +104,9 @@
       opts.headers['Content-Type'] = 'application/json';
       opts.body = JSON.stringify(body);
     }
+    // ★ 每个请求都带上登录凭证：书单是按人隔离的，服务端靠它判断"你是谁"
+    var token = readToken();
+    if (token) opts.headers['Authorization'] = 'Bearer ' + token;
 
     return fetch(API_BASE + path, opts)
       .then(function (r) {
@@ -887,6 +898,10 @@
     if (opt.force !== true) {
       if (isAutoOff()) return Promise.resolve({ started: false, reason: 'turned-off' });
       if (!isMigrated()) return Promise.resolve({ started: false, reason: 'not-migrated' });
+      // ★ Day 31：没登录就不同步。书单现在按人存，
+      //   没凭证的请求服务端一律拒，硬发只会换来一串"请先登录"的红条。
+      //   这种情况下继续用本地书单，体验和以前完全一样。
+      if (!readToken()) return Promise.resolve({ started: false, reason: 'not-signed-in' });
     }
 
     enable();                       // installHooks 要求 enabled，顺序不能反
@@ -896,6 +911,13 @@
       var Store = global.Store;
       if (!Store || typeof Store.replaceBooks !== 'function') {
         return { started: true, hooked: hooked, pulled: 0, reason: 'store-cannot-write' };
+      }
+      // ★ 安全阀：云端是空的、本地却有书 —— 绝不覆盖。
+      //   多账号之后这条变得很要紧：换个新账号登录，云端书单当然是空的，
+      //   这时候要是无脑 replaceBooks，本地攒的书就被一次清空了。
+      var local = readLocalBooks();
+      if (books.length === 0 && local.length > 0) {
+        return { started: true, hooked: hooked, pulled: 0, reason: 'cloud-empty-local-not' };
       }
       var w = Store.replaceBooks(books);
       if (!w || !w.ok) {

@@ -33,11 +33,14 @@ const REQUEST_TIMEOUT_MS = 8000;
 // Day 23 余力（软删除）：只取 is_deleted = false 的行。
 // 被"删掉"的书仍然躺在表里（is_deleted = true），所以这里必须过滤，
 // 否则删过的书会重新出现在列表里 —— 那就等于没删。
-async function fetchBooks(limit, baseUrl, apiKey) {
+async function fetchBooks(limit, userId, baseUrl, apiKey) {
+  // ⚠️ userId 为空就中止：空条件查询等于把所有人的书全返回
+  if (!userId) throw new Error("fetchBooks 缺少 userId，已中止");
   const params = new URLSearchParams({
     select: "*",
     order: "createdAt.desc",
     is_deleted: "eq.false",
+    userId: `eq.${userId}`,
   });
   if (limit !== undefined) params.set("limit", String(limit));
 
@@ -56,11 +59,13 @@ async function fetchBooks(limit, baseUrl, apiKey) {
 // 参数里还要做编码，多一个坑，所以选「全拉回来在内存里比」。
 // 口径（大帅拍板）：书名+作者都相同（trim 后）即算重复，其他字段不管——
 // 同一本书补了封面再存也会被拒。
-async function findDuplicate(title, author, baseUrl, apiKey) {
+async function findDuplicate(title, author, userId, baseUrl, apiKey) {
+  if (!userId) throw new Error("findDuplicate 缺少 userId，已中止");
   // Day 23 余力：被软删的书不该挡住重新添加 —— 删过的书再添一遍是正常需求
   const params = new URLSearchParams({
     select: "id,title,author",
     is_deleted: "eq.false",
+    userId: `eq.${userId}`,
   });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -78,12 +83,15 @@ async function findDuplicate(title, author, baseUrl, apiKey) {
 // 读单本（Day 22）：按 id 查一行，查不到返回 null。
 // PATCH 之前必须先调它——「先确认这本书在不在」是今天的核心动作：
 // 不查就改，改到 0 行也会被当成成功，用户以为改了、其实什么都没发生。
-async function findBookById(id, baseUrl, apiKey) {
+async function findBookById(id, userId, baseUrl, apiKey) {
+  if (!id) throw new Error("findBookById 缺少 id，已中止");
+  if (!userId) throw new Error("findBookById 缺少 userId，已中止");
   // Day 23 余力：软删掉的书在接口层看来等于"不存在"，PATCH 不该还能改它
   const params = new URLSearchParams({
     select: "*",
     id: `eq.${id}`,
     is_deleted: "eq.false",
+    userId: `eq.${userId}`,
   });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     headers: { Authorization: `Bearer ${apiKey}` },
@@ -101,8 +109,11 @@ async function findBookById(id, baseUrl, apiKey) {
 //   Prefer: return=representation  → 让数据源把「改后那一行」回给我们
 // 不加这个头，PostgREST 默认返回 204 空响应，接口就没法把改后的结果给前端。
 // 影响 0 行时它返回的是空数组 []，这里转成 null，让上层能分辨「没改到东西」。
-async function updateBook(id, patch, baseUrl, apiKey) {
-  const params = new URLSearchParams({ id: `eq.${id}` });
+async function updateBook(id, patch, userId, baseUrl, apiKey) {
+  if (!userId) throw new Error("updateBook 缺少 userId，已中止");
+  // ★ 条件里同时有 id 和 userId：改不到别人的书。
+  //   改别人的书返回 0 行 → 上层如实报"这本书不存在"，而不是"没权限"（不泄露别人有什么书）
+  const params = new URLSearchParams({ id: `eq.${id}`, userId: `eq.${userId}` });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     method: "PATCH",
     headers: {
@@ -155,10 +166,11 @@ async function deleteNotesByBookId(bookId, baseUrl, apiKey) {
 // ⚠️ 条件里带 is_deleted=eq.false 有两层用处：
 //    ① 对同一本书重复删除，第二次会返回 0 行，接口能如实报"这本书不存在"
 //    ② 条件里永远同时有 id 和 is_deleted，绝不会退化成"无条件的整表更新"
-async function softDeleteBook(id, baseUrl, apiKey) {
+async function softDeleteBook(id, userId, baseUrl, apiKey) {
+  if (!userId) throw new Error("softDeleteBook 缺少 userId，已中止");
   if (!id) throw new Error("softDeleteBook 缺少 id，已中止");
 
-  const params = new URLSearchParams({ id: `eq.${id}`, is_deleted: "eq.false" });
+  const params = new URLSearchParams({ id: `eq.${id}`, userId: `eq.${userId}`, is_deleted: "eq.false" });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     method: "PATCH",
     headers: {
@@ -179,10 +191,11 @@ async function softDeleteBook(id, baseUrl, apiKey) {
 // 硬删（Day 22）：按 id 精确删一行，返回真实删掉的行数（0 = 什么都没删到）。
 // Day 23 余力起，/api/books/:id 的 DELETE 改走 softDeleteBook，这里不再被接口调用；
 // 保留它是因为"彻底清理"迟早要用（比如清测试数据），底层的 id 空值保险继续有效。
-async function deleteBook(id, baseUrl, apiKey) {
+async function deleteBook(id, userId, baseUrl, apiKey) {
+  if (!userId) throw new Error("deleteBook 缺少 userId，已中止");
   if (!id) throw new Error("deleteBook 缺少 id，已中止");
 
-  const params = new URLSearchParams({ id: `eq.${id}` });
+  const params = new URLSearchParams({ id: `eq.${id}`, userId: `eq.${userId}` });
   const resp = await fetch(`${baseUrl}/v1/rdb/rest/books?${params}`, {
     method: "DELETE",
     headers: {
@@ -215,6 +228,36 @@ async function insertBook(row, baseUrl, apiKey) {
   }
 }
 
+// ---------------------------------------------------------------- 登录态（Day 31）
+//
+// 书单归属到人之后，每个接口都要先回答「你是谁」。
+// sessions / users 两张表与 auth、community 共用，这里只是第三个读者。
+// 云函数之间不能互调代码，所以这三处各自查一遍 —— 不是重复实现，是同一份数据的三个读者。
+
+/** 按 token 查会话。没查到返回 null。 */
+async function findSessionByToken(token, baseUrl, apiKey) {
+  if (!token) throw new Error("findSessionByToken 缺少 token，已中止");
+  const resp = await fetch(
+    `${baseUrl}/v1/rdb/rest/sessions?${new URLSearchParams({ select: "*", token: `eq.${token}`, limit: "1" })}`,
+    { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }
+  );
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
+/** 按 id 查用户。没查到返回 null。 */
+async function findUserById(id, baseUrl, apiKey) {
+  if (!id) throw new Error("findUserById 缺少 id，已中止");
+  const resp = await fetch(
+    `${baseUrl}/v1/rdb/rest/users?${new URLSearchParams({ select: "*", id: `eq.${id}`, limit: "1" })}`,
+    { headers: { Authorization: `Bearer ${apiKey}` }, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) }
+  );
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
 module.exports = {
   fetchBooks,
   findDuplicate,
@@ -224,4 +267,6 @@ module.exports = {
   deleteNotesByBookId,
   softDeleteBook,
   deleteBook,
+  findSessionByToken,
+  findUserById,
 };

@@ -354,6 +354,26 @@
     MOCK_CONVERSATIONS.length = 0;
   }
 
+  /**
+   * 登录之后把云同步接上（书单现在按人存，没登录时同步是关着的）。
+   *
+   * 一个特意留下的空档：如果云端书单是空的、本地却有书，
+   * autoStart 会返回 cloud-empty-local-not 并**拒绝覆盖**。
+   * 这时不会自动把本地书推上去 —— 因为分不清这些书是"我刚加的"
+   * 还是"上一个登录的人留下的"。宁可让它留着，也不要把 A 的书算到 B 头上。
+   */
+  function startBookSync() {
+    if (!window.Sync || typeof window.Sync.autoStart !== 'function') return;
+    window.Sync.autoStart().then(
+      function (r) {
+        if (r && r.reason === 'cloud-empty-local-not') {
+          showError('云端书单还是空的，本机这些书没有自动上传。如果要带过去，告诉我，我给你办法。');
+        }
+      },
+      function () { /* 同步失败不该打断登录流程 */ }
+    );
+  }
+
   /* =============================================================
    * 1. 小工具
    * ============================================================= */
@@ -2400,6 +2420,9 @@
         updateNavUser();
         // 登录后拉一次私信，导航栏红点才有数（不拉的话永远显示 0）
         loadConversations().then(renderNavBadge, function () {});
+        // Day 31：书单改成按人存了 —— 登录之后才接得上云同步。
+        // （没登录时 autoStart 会自己退出，本地书单照常用，体验和以前一样）
+        startBookSync();
         settle();
         go('/');
         showSuccess((isRegister ? '注册成功，欢迎 ' : '欢迎回来，') + data.user.username + '！');

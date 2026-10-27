@@ -87,6 +87,40 @@ function describeError(err) {
   return "数据源暂时不可用，请稍后重试";
 }
 
+// ---------- 鉴权（Day 31） ----------
+//
+// 书单从「全局共享」改成「每人一份」之后，每个请求都要先回答「你是谁」。
+// 三个云函数（books / auth / community）各自实现一份验 token —— 不是偷懒重复，
+// 是云函数之间不能互相 require，只能各自查同一张 sessions 表。
+
+function readBearer(req) {
+  const raw = req.headers["authorization"] || req.headers["Authorization"] || "";
+  const m = /^Bearer\s+(\S+)$/i.exec(String(raw).trim());
+  return m ? m[1] : "";
+}
+
+/**
+ * 验 token。成功返回 { user }，失败返回 { error }（中文，可直接显示给用户）。
+ * ⚠️ 过期要真判：sessions.expiresAt 不是摆设。
+ */
+function requireUser(req, baseUrl, apiKey) {
+  const token = readBearer(req);
+  if (!token) return Promise.resolve({ error: "请先登录" });
+
+  return db
+    .findSessionByToken(token, baseUrl, apiKey)
+    .then((session) => {
+      if (!session) return { error: "登录状态已失效，请重新登录" };
+      if (String(session.expiresAt) <= new Date().toISOString()) {
+        return { error: "登录已过期，请重新登录" };
+      }
+      return db.findUserById(session.userId, baseUrl, apiKey).then((user) => {
+        if (!user) return { error: "登录状态已失效，请重新登录" };
+        return { user };
+      });
+    });
+}
+
 // 余力加练（Day 18）：每次请求留一行服务端日志。
 // 部署后在控制台「函数 → 日志」里能看到，以后排查「用户说接口不对」时
 // 先看这里：请求到底进没进来、走到了哪个分支。
@@ -282,7 +316,8 @@ function validatePatch(body) {
 }
 
 // PATCH /api/books/:id 的处理体（写在路由外面，是为了能用 async/await 线性读）
-async function handlePatch(req, res, id, baseUrl, apiKey) {
+async function handlePatch(req, res, id, userId, baseUrl, apiKey) {
+  if (!userId) { fail(res, "请先登录"); return; }
   let raw;
   try {
     raw = await readBody(req);
@@ -317,7 +352,7 @@ async function handlePatch(req, res, id, baseUrl, apiKey) {
   try {
     // 第一层保护：先确认这本书真的存在。不存在就别往下改，
     // 免得「改了 0 行」被当成成功回报给前端。
-    const current = await db.findBookById(id, baseUrl, apiKey);
+    const current = await db.findBookById(id, userId, baseUrl, apiKey);
     if (!current) {
       fail(res, "这本书不存在，可能已被删除");
       log("PATCH", `/api/books/${id}`, "404", "查无此书");
@@ -335,7 +370,7 @@ async function handlePatch(req, res, id, baseUrl, apiKey) {
       patch.finishedAt = now;
     }
 
-    const updated = await db.updateBook(id, patch, baseUrl, apiKey);
+    const updated = await db.updateBook(id, patch, userId, baseUrl, apiKey);
     if (!updated) {
       // 极端情况：查到之后、改之前这条被别人删了。
       // 不报成功——影响 0 行就是没改到。
@@ -374,7 +409,8 @@ async function handlePatch(req, res, id, baseUrl, apiKey) {
 // Day 23 余力补了一条：第 ② 层从「物理删行」换成「打 is_deleted 标记」。
 //   原文写的"接口层没有任何撤销手段"到此为止不再成立 —— 现在撤得回来，
 //   一句 UPDATE books SET is_deleted = false WHERE id = '...' 就能还原。
-async function handleDelete(req, res, id, baseUrl, apiKey) {
+async function handleDelete(req, res, id, userId, baseUrl, apiKey) {
+  if (!userId) { fail(res, "请先登录"); return; }
   if (!apiKey) {
     fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
     log("DELETE", `/api/books/${id}`, "500", "缺少 PG_API_KEY");
@@ -384,7 +420,7 @@ async function handleDelete(req, res, id, baseUrl, apiKey) {
   try {
     // ① 先确认这本书真的在。不在就直接报错——不要试图去删一个不存在的东西，
     //    那样只会得到「删除成功 0 行」这种既没意义又容易让人误会的结论。
-    const current = await db.findBookById(id, baseUrl, apiKey);
+    const current = await db.findBookById(id, userId, baseUrl, apiKey);
     if (!current) {
       fail(res, "这本书不存在，可能已被删除");
       log("DELETE", `/api/books/${id}`, "404", "查无此书");
@@ -396,7 +432,7 @@ async function handleDelete(req, res, id, baseUrl, apiKey) {
     //    笔记【故意保留】：以后恢复时笔记也跟着回来，这才是"删错可找回"的完整形态。
     //    ⚠️ 这也是与 Day 22 的唯一分歧点：Day 22 是「先删笔记再删书」，
     //    现在笔记不删了。契约 3.4 的措辞要不要跟着改，等大帅拍板（见 journal 待办）。
-    const softDeleted = await db.softDeleteBook(id, baseUrl, apiKey);
+    const softDeleted = await db.softDeleteBook(id, userId, baseUrl, apiKey);
 
     // ③ 数据源说影响 0 行 = 没删到，就不能回成功
     //    （软删的条件里带了 is_deleted = false，所以重复删除会走到这里）
@@ -441,22 +477,39 @@ const server = http.createServer((req, res) => {
       return fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
     }
 
-    db.fetchBooks(limit, baseUrl, apiKey)
-      .then((rows) => {
-        log("GET", "/api/books", "200", `返回 ${rows.length} 本`);
-        send(res, { ok: true, data: { books: rows } });
-      })
-      .catch((err) => {
-        // Day 23：原始异常只进日志，用户只看人话
-        log("GET", "/api/books", "500", err.message);
-        fail(res, describeError(err));
-      });
-    return;
+    // Day 31：书单归属到人，先验明身份再查。
+    // 没登录就返回空书单是不对的 —— 那会被前端误当成"这个人的书单空了"，
+    // 如实说「请先登录」，让前端自己决定是继续用本地书单还是提示登录。
+    return requireUser(req, baseUrl, apiKey).then((auth) => {
+      if (auth.error) {
+        log("GET", "/api/books", "401", auth.error);
+        return fail(res, auth.error);
+      }
+      return db
+        .fetchBooks(limit, auth.user.id, baseUrl, apiKey)
+        .then((rows) => {
+          log("GET", "/api/books", "200", `${auth.user.id} 的书单返回 ${rows.length} 本`);
+          send(res, { ok: true, data: { books: rows } });
+        })
+        .catch((err) => {
+          // Day 23：原始异常只进日志，用户只看人话
+          log("GET", "/api/books", "500", err.message);
+          fail(res, describeError(err));
+        });
+    });
   }
 
   // ---------- POST /api/books（Day 18 新增） ----------
   if (req.method === "POST" && url.pathname === "/api/books") {
-    readBody(req)
+    // Day 31：新增的书必须知道属于谁，所以先验身份
+    return requireUser(req, baseUrl, apiKey).then((auth) => {
+      if (auth.error) {
+        log("POST", "/api/books", "401", auth.error);
+        return fail(res, auth.error);
+      }
+      const userId = auth.user.id;
+
+      return readBody(req)
       .then((raw) => {
         // 第 1 关：必须是合法 JSON
         let body;
@@ -483,7 +536,7 @@ const server = http.createServer((req, res) => {
         }
 
         // 第 3 关：查重（书名+作者相同 → 拒绝，防重复提交）
-        db.findDuplicate(row.title, row.author, baseUrl, apiKey)
+        db.findDuplicate(row.title, row.author, userId, baseUrl, apiKey)
           .then((dup) => {
             if (dup) {
               fail(res, "这本书已经在书单里了，不用重复添加");
@@ -495,13 +548,14 @@ const server = http.createServer((req, res) => {
             const book = {
               id: newId("book"),
               ...row,
+              userId: userId,        // ★ 归属：只认 token 里的人，前端传什么都不看
               startedAt: null,
               finishedAt: null,
               createdAt: new Date().toISOString(),
             };
             db.insertBook(book, baseUrl, apiKey)
               .then(() => {
-                log("POST", "/api/books", "200", `新增 ${book.id}《${book.title}》`);
+                log("POST", "/api/books", "200", `新增 ${book.id}《${book.title}》→ ${userId}`);
                 // 契约 3.2：返回 { ok: true, data: { book: {...} } }
                 send(res, { ok: true, data: { book } });
               })
@@ -519,7 +573,7 @@ const server = http.createServer((req, res) => {
         fail(res, err.message === "请求体太大" ? "请求体太大，请减小内容后重试" : "读取请求失败");
         log("POST", "/api/books", "400", err.message);
       });
-    return;
+    });
   }
 
   // ---------- PATCH /api/books/:id（Day 22 新增） ----------
@@ -532,7 +586,16 @@ const server = http.createServer((req, res) => {
         log("PATCH", url.pathname, "400", m.error);
         return;
       }
-      handlePatch(req, res, m.id, baseUrl, apiKey);
+      // Day 31：改的是自己那本 —— 验明身份后把 userId 传下去，
+      // 条件里同时带 id 和 userId，改不到别人的书
+      requireUser(req, baseUrl, apiKey).then((auth) => {
+        if (auth.error) {
+          fail(res, auth.error);
+          log("PATCH", url.pathname, "401", auth.error);
+          return;
+        }
+        handlePatch(req, res, m.id, auth.user.id, baseUrl, apiKey);
+      });
       return;
     }
   }
@@ -548,7 +611,15 @@ const server = http.createServer((req, res) => {
         log("DELETE", url.pathname, "400", m.error);
         return;
       }
-      handleDelete(req, res, m.id, baseUrl, apiKey);
+      // Day 31：只能删自己那本（软删条件里带 userId）
+      requireUser(req, baseUrl, apiKey).then((auth) => {
+        if (auth.error) {
+          fail(res, auth.error);
+          log("DELETE", url.pathname, "401", auth.error);
+          return;
+        }
+        handleDelete(req, res, m.id, auth.user.id, baseUrl, apiKey);
+      });
       return;
     }
   }
