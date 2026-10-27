@@ -3145,7 +3145,12 @@
     setStatus(reason + '｜下面显示的是上次 ' + clock + ' 抓到的旧数据，可能已过期', true);
   }
 
+  // ★ Day 31：并发保护。连点「刷新」时先发的请求可能后到，把新数据盖成旧的。
+  // 做法：每次请求领一个递增序号，回来时只有「最新那一次」的结果才允许画到页面上。
+  var apiDemoSeq = 0;
+
   function loadApiDemo() {
+    var seq = ++apiDemoSeq;
     fetch(API_DEMO_URL)
       .then(function (r) {
         // 先取文本而不是直接 r.json()：网关回错误页时是 HTML，
@@ -3168,9 +3173,11 @@
         if (!body || body.ok !== true) {
           throw apiError('biz', (body && body.error) || '接口拒绝了这次请求');
         }
+        if (seq !== apiDemoSeq) return;   // 已经有更新的请求在跑，这份结果作废
         renderApiDemoTable((body.data && body.data.books) || []);
       })
       .catch(function (err) {
+        if (seq !== apiDemoSeq) return;   // 旧请求的失败不该盖掉新请求的状态
         // 原始错误只给开发者看，用户只看到人话
         if (window.console && window.console.error) {
           window.console.error('[api-demo] 原始错误（只给自己排查用）：', err);
