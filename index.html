@@ -934,13 +934,25 @@
      community.js 是 Day 11 新增的社区层（论坛/私信/登录），
      它要读到 app.js 暴露的视图切换能力，所以放在 app.js 之后。
      sync.js（Day 29）是云端同步层：只依赖 store.js，所以紧跟其后。
-     ⚠️ 它默认关闭（enabled=false），**不会自动跑任何请求**；
-        要用必须在控制台手动 Sync.enable()。见 docs/PLAN-data-sync.md
+     ⚠️ Day 30 起它会在页面加载后**自动启动**（Sync.autoStart），
+        但只在**这台机器已经迁移过**时才真的连（localStorage 里
+        reading:sync-migrated === '1'）；没迁移过就什么都不做，
+        免得云端反过来覆盖本地书。
+        想临时关掉：localStorage.setItem('reading:sync-auto','off')
      ============================================================ -->
 <script src="store.js"></script>
 <script src="sync.js"></script>
 <script src="app.js"></script>
 <script src="community.js"></script>
+
+<!-- Day 30｜把「手动在控制台敲 Sync.enable()」变成打开页面就自动接上。
+     放在所有脚本之后：它要读 app.js 暴露的 AppViews 才能重画列表。
+     autoStart 内部自己判断「有没有迁移过」，没迁移过会直接返回、不发请求。 -->
+<script>
+  if (window.Sync && typeof Sync.autoStart === 'function') {
+    Sync.autoStart();
+  }
+</script>
 
 </body>
 </html>

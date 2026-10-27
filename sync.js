@@ -854,6 +854,64 @@
     } catch (e) { /* 重绘失败不该影响主流程 */ }
   }
 
+  /* ------------------------------------------------------------ 自动启动 */
+
+  /**
+   * 自动启动：把「打开页面」变成「接上同步 + 拉一次云端」。
+   *
+   * 为什么不能无条件启动（这是整个文件里最要紧的一条）：
+   *   没迁移过的机器上，本地书的 id 还是 book_xxx，云端是 book-mvpa…，
+   *   两边根本不是同一批对象。这时候先 fetchAll() 再 replaceBooks()，
+   *   等于**用云端把本地覆盖掉**——本地那几本从没推上去的书就没了，
+   *   而且看起来像"书丢了"，比报错更让人慌。
+   *   所以钥匙是 isMigrated()：迁移过才敢动。
+   *
+   * 为什么拉取失败时绝对不碰本地缓存：
+   *   断网打开页面，应该看到上次的书，而不是一片空白。
+   *   fetchAll 抛了就走失败分支，只提示、不写缓存。
+   *
+   * 关掉的办法（不用改代码）：
+   *   localStorage.setItem('reading:sync-auto', 'off')   // 下次打开不再自动连
+   *   localStorage.removeItem('reading:sync-auto')       // 恢复
+   */
+  var KEY_AUTO_OFF = 'reading:sync-auto';
+
+  function isAutoOff() {
+    try { return global.localStorage.getItem(KEY_AUTO_OFF) === 'off'; } catch (e) { return false; }
+  }
+
+  function autoStart(options) {
+    var opt = options || {};
+
+    // force 只给排查用，正常情况下不该有人传
+    if (opt.force !== true) {
+      if (isAutoOff()) return Promise.resolve({ started: false, reason: 'turned-off' });
+      if (!isMigrated()) return Promise.resolve({ started: false, reason: 'not-migrated' });
+    }
+
+    enable();                       // installHooks 要求 enabled，顺序不能反
+    var hooked = installHooks();
+
+    return fetchAll().then(function (books) {
+      var Store = global.Store;
+      if (!Store || typeof Store.replaceBooks !== 'function') {
+        return { started: true, hooked: hooked, pulled: 0, reason: 'store-cannot-write' };
+      }
+      var w = Store.replaceBooks(books);
+      if (!w || !w.ok) {
+        return { started: true, hooked: hooked, pulled: 0, reason: 'cache-write-failed' };
+      }
+      refreshListIfVisible();       // 界面可能已经画完了旧数据，得重画
+      return { started: true, hooked: hooked, pulled: books.length };
+    }, function (err) {
+      // 失败分支：本地缓存保持原样，只把原因显示出来
+      status.lastError = err;
+      status.failed++;
+      showSyncError('云端数据没拉下来，先显示本机缓存：' + describeApiError(err));
+      return { started: true, hooked: hooked, pulled: 0, error: describeApiError(err) };
+    });
+  }
+
   /* -------------------------------------------------------------- 导出 */
 
   global.Sync = {
@@ -879,6 +937,9 @@
 
     installHooks: installHooks,
     uninstallHooks: uninstallHooks,
+    autoStart: autoStart,
+    isAutoOff: isAutoOff,
+    KEY_AUTO_OFF: KEY_AUTO_OFF,
     setErrorHandler: setErrorHandler,
     getStatus: getStatus,
     settle: settle,
