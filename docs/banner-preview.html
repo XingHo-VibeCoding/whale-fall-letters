@@ -3,73 +3,122 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>同步失败提示条 · 预览（用真 styles.css）</title>
-<!-- 直接引仓库里的真样式，不是复制的副本，所以看到的就是线上那个样子 -->
+<title>同步失败提示条 · 真页面预览</title>
+<!-- 引仓库里的真 styles.css，颜色/圆角/字号就是线上那份 -->
 <link rel="stylesheet" href="../styles.css">
 <style>
-  /* 只为本预览页服务的排版，不进仓库 */
-  .preview-wrap { max-width: 420px; margin: 0 auto; padding: 20px 16px 120px; }
-  .preview-h { font-size: 15px; font-weight: 500; margin: 26px 0 8px; color: var(--ink); }
-  .preview-note { font-size: 12px; color: var(--ink-soft); line-height: 1.7; margin: 0 0 12px; }
-  .demo-btn {
-    display: inline-block; margin: 6px 8px 6px 0; padding: 8px 14px;
-    border: 1px solid var(--accent); border-radius: var(--radius);
-    background: var(--card); color: var(--accent); font: inherit; cursor: pointer;
+  /* 只服务这一页，不进产品样式：说明区 + 按钮组 */
+  .preview-tools {
+    margin: 26px 0 40px; padding: 14px;
+    border: 1px dashed var(--line); border-radius: var(--radius);
+    background: var(--card);
   }
-  .phone-frame {
-    border: 1px solid var(--line); border-radius: 14px; background: var(--paper);
-    padding: 14px; margin-bottom: 10px;
-  }
-  /* 三条不同状态的条一起摆出来，方便一眼比对 */
-  .stack .sync-banner { position: static; transform: none; margin-bottom: 10px; max-width: none; }
+  .preview-tools h2 { margin: 0 0 8px; font-size: 13px; font-weight: 500; color: var(--ink); }
+  .preview-tools p { margin: 0 0 10px; font-size: 12px; line-height: 1.7; color: var(--ink-soft); }
+  .preview-tools .row { display: flex; flex-wrap: wrap; gap: 8px; }
 </style>
 </head>
 <body>
 
-<div class="preview-wrap">
-  <h1 style="font-size:15px;font-weight:500;color:var(--ink)">同步失败提示条 · 预览</h1>
-  <p class="preview-note">
-    这一页引的是 <code>whale-fall-letters/styles.css</code> 本体，所以颜色、圆角、字号就是线上那份。
-    下面是三种文案放在手机宽度里的样子；最后一块是**真的在页面底部**弹出来（点按钮试）。
-  </p>
-
-  <div class="preview-h">① 添加失败</div>
-  <div class="stack">
-    <div class="sync-banner" role="status">
-      <span class="sync-banner-text">「添加《云边有个小卖部》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试</span>
-      <button type="button" class="sync-banner-close">知道了</button>
+<!-- ===== 这一块是从 index.html 原样复制的真导航（顶部 sticky，不是底部） ===== -->
+<header class="site-nav">
+  <div class="site-nav-inner">
+    <a class="site-brand" href="#">
+      <span class="site-brand-mark">鲸</span>
+      <span class="site-brand-text">鲸落书简</span>
+    </a>
+    <nav class="site-nav-links">
+      <button class="site-nav-link is-active" type="button">首页</button>
+      <button class="site-nav-link" type="button">论坛</button>
+      <button class="site-nav-link" type="button">私信</button>
+      <button class="site-nav-link" type="button">我的</button>
+      <button class="site-nav-link" type="button">接口数据</button>
+    </nav>
+    <div class="site-nav-auth">
+      <button class="btn btn-primary btn-sm" type="button">登录 / 注册</button>
     </div>
   </div>
+</header>
 
-  <div class="preview-h">② 修改失败（文案短一些）</div>
-  <div class="stack">
-    <div class="sync-banner" role="status">
-      <span class="sync-banner-text">「修改」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试</span>
-      <button type="button" class="sync-banner-close">知道了</button>
+<div class="wrap">
+  <section class="view">
+    <!-- 真类名的书单卡片，用来判断「底部提示条会不会压住最后一张卡」 -->
+    <div class="book-list">
+
+      <article class="book-card">
+        <div class="cover"><span>三</span></div>
+        <div class="book-card-body">
+          <h3 class="book-title">三体</h3>
+          <p class="book-author">刘慈欣</p>
+          <span class="badge badge-reading">在读</span>
+          <p class="progress-line">第 88 / 300 页 · 29%</p>
+          <div class="bar"><div class="bar-fill" style="width:29%"></div></div>
+        </div>
+      </article>
+
+      <article class="book-card">
+        <div class="cover"><span>活</span></div>
+        <div class="book-card-body">
+          <h3 class="book-title">活着</h3>
+          <p class="book-author">余华</p>
+          <span class="badge badge-reading">在读</span>
+          <p class="progress-line">第 88 / 191 页 · 46%</p>
+          <div class="bar"><div class="bar-fill" style="width:46%"></div></div>
+        </div>
+      </article>
+
+      <article class="book-card">
+        <div class="cover"><span>人</span></div>
+        <div class="book-card-body">
+          <h3 class="book-title">人类简史</h3>
+          <p class="book-author">尤瓦尔·赫拉利</p>
+          <span class="badge badge-want">想读</span>
+        </div>
+      </article>
+
+      <article class="book-card">
+        <div class="cover"><span>小</span></div>
+        <div class="book-card-body">
+          <h3 class="book-title">小王子</h3>
+          <p class="book-author">圣埃克苏佩里</p>
+          <span class="badge badge-finished">已读</span>
+        </div>
+      </article>
+
+      <article class="book-card">
+        <div class="cover"><span>国</span></div>
+        <div class="book-card-body">
+          <h3 class="book-title">国境以南 太阳以西</h3>
+          <p class="book-author">村上春树</p>
+          <span class="badge badge-reading">在读</span>
+          <p class="progress-line">第 45 / 317 页 · 14%</p>
+          <div class="bar"><div class="bar-fill" style="width:14%"></div></div>
+        </div>
+      </article>
+
+    </div>
+  </section>
+
+  <!-- 说明与按钮：放在列表之后，所以打开首屏先看到的是「真页面 + 提示条」 -->
+  <div class="preview-tools">
+    <h2>怎么看这一页（滚到这儿说明你已经到底了）</h2>
+    <p>
+      提示条在 <strong>1.2 秒后自动弹一次</strong>，贴在屏幕底部、列表最后一张卡上面。
+      要看的就两件事：<strong>它有没有压住最后一张卡片</strong>、<strong>圆角和字号跟页面搭不搭</strong>。
+    </p>
+    <p>
+      顺带纠正一句：这个项目的导航在<strong>顶部</strong>（sticky，手机上折成两行），<strong>没有底部导航栏</strong>，
+      所以之前让你「看会不会挡住底部导航」是我说错了。
+    </p>
+    <div class="row">
+      <button type="button" class="btn btn-primary btn-sm" id="btn-show">再弹一次</button>
+      <button type="button" class="btn btn-sm" id="btn-show-long">弹超长书名</button>
+      <button type="button" class="btn btn-sm" id="btn-hide">收起</button>
     </div>
   </div>
-
-  <div class="preview-h">③ 删除失败</div>
-  <div class="stack">
-    <div class="sync-banner" role="status">
-      <span class="sync-banner-text">「删除」没同步到云端，已恢复原样：服务器返回 502，请稍后重试</span>
-      <button type="button" class="sync-banner-close">知道了</button>
-    </div>
-  </div>
-
-  <div class="preview-h">④ 真的在底部弹出来</div>
-  <p class="preview-note">点下面的按钮，条会固定在页面底部居中，12 秒自己收起；点「知道了」也能收。</p>
-  <div class="phone-frame">
-    <button type="button" class="demo-btn" id="btn-show">弹一条试试</button>
-    <button type="button" class="demo-btn" id="btn-show-long">弹一条很长的（书名很长的极端情况）</button>
-  </div>
-  <p class="preview-note">
-    ⚠️ 这一页只证明「样式和文案长这样」。<strong>真机效果还得你自己在手机上看一眼</strong>：
-    会不会挡住底部导航、圆角和你现在的页面搭不搭。
-  </p>
 </div>
 
-<!-- 下面这段只是让 ④ 能真弹出来，逻辑和 sync.js 里的 showSyncError 一致 -->
+<!-- 真的提示条，结构和 sync.js 里造的一模一样 -->
 <div class="sync-banner" id="live-banner" role="status" aria-live="polite" hidden>
   <span class="sync-banner-text" id="live-text"></span>
   <button type="button" class="sync-banner-close" id="live-close">知道了</button>
@@ -92,12 +141,18 @@
   }
 
   document.getElementById('live-close').addEventListener('click', hide);
+  document.getElementById('btn-hide').addEventListener('click', hide);
   document.getElementById('btn-show').addEventListener('click', function () {
     show('「添加《三体》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
   });
   document.getElementById('btn-show-long').addEventListener('click', function () {
     show('「添加《献给阿尔吉侬的花束（纪念版·全译注本）》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
   });
+
+  // 打开 1.2 秒后自动弹一次，不点按钮也能看见真实位置
+  setTimeout(function () {
+    show('「添加《三体》」没同步到云端，已恢复原样：连不上服务器，请检查网络后重试');
+  }, 1200);
 </script>
 
 </body>
