@@ -113,13 +113,13 @@
   <div class="preview-tools">
     <h2>怎么看这一页（滚到这儿说明你已经到底了）</h2>
     <p>
-      提示条 1.2 秒后自动弹一次。这一版改了一个地方：<strong>弹出时会给页面底部让出空间</strong>
-      （body 加等高 padding），所以它<strong>不再压住最后一张卡</strong>，内容能滚上来。
-      收起后空间自动撤掉。
+      提示条 1.2 秒后自动弹一次。这一版修的是上一版的问题：上一版只给底部让了空间，
+      条弹出来时<strong>还是挡着</strong>，得你自己往上滑才看得见。
+      现在改成<strong>「让位 + 替你滑一下」</strong>：如果你当时就在页面底部，会自动把视图推上来一段。
     </p>
     <p>
       要看的还是两件事：<strong>最后一张卡能不能完整露出来</strong>、<strong>圆角和字号搭不搭</strong>。
-      点下面「弹超长书名」，条会变高，看它变高后还会不会挡。
+      点「弹超长书名」，条会变高，看变高后还挡不挡。
     </p>
     <div class="row">
       <button type="button" class="btn btn-primary btn-sm" id="btn-show">再弹一次</button>
@@ -156,10 +156,24 @@
     }
   }
 
+  /* 和 sync.js 里的 nearBottom 同一套判断 */
+  function nearBottom() {
+    var doc = document.documentElement;
+    var y = window.pageYOffset || doc.scrollTop || 0;
+    var vh = window.innerHeight || doc.clientHeight || 0;
+    var sh = Math.max(document.body.scrollHeight, doc.scrollHeight);
+    return sh ? (y + vh) >= (sh - 60) : false;
+  }
+
   function show(msg) {
     liveText.textContent = msg;
     liveBanner.hidden = false;
-    reserve(liveBanner.offsetHeight + 26);
+
+    var h = liveBanner.offsetHeight + 26;
+    var atBottom = nearBottom();
+    reserve(h);
+    if (atBottom) window.scrollBy(0, h);   // 在底部就替你滑那一下
+
     if (timer) clearTimeout(timer);
     timer = setTimeout(hide, 12000);
   }

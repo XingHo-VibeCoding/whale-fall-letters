@@ -758,6 +758,29 @@
   }
 
   /**
+   * 现在是不是已经滚到底部附近？
+   *
+   * 用途：决定弹条时要不要「替你滑那一下」。
+   * 你正看着最后一张卡，条弹出来把它盖住——这时候自动往下推一段才有意义；
+   * 你要是正在看上半部分，底部那块被盖住你根本没在看，硬推一下反而打断你。
+   */
+  function nearBottom() {
+    try {
+      var doc = global.document.documentElement || {};
+      var y = global.pageYOffset || doc.scrollTop || 0;
+      var vh = global.innerHeight || doc.clientHeight || 0;
+      var sh = Math.max(
+        (global.document.body && global.document.body.scrollHeight) || 0,
+        doc.scrollHeight || 0
+      );
+      if (!sh) return false;
+      return (y + vh) >= (sh - 60);
+    } catch (e) {
+      return false;
+    }
+  }
+
+  /**
    * 弹一条同步失败提示。返回 true = 真的显示出来了；
    * false = 没有 DOM（比如 Node 里跑测试），此时只有 console。
    */
@@ -767,10 +790,16 @@
     if (bannerTextEl) bannerTextEl.textContent = message;
     el.hidden = false;
 
-    // 关键：给页面底部让出等高的空间。
-    // 只把条往上挪没用——它还是会压住最下面那张卡；让出空间后内容能滚上来，
-    // 条是「多出来的一层」，不是「盖在上面的一层」。
-    reserveSpaceForBanner(el.offsetHeight + 26);
+    // 两件事一起做，缺一件都不行：
+    //   ① 给页面底部让出等高的空间（不然内容永远滚不出来）
+    //   ② 如果你当时就在底部，替你把视图推上来一段（不然你还得自己滑）
+    // 只做 ① 的结果就是真机上看到的：条还在挡，得手动往上滑才看得见。
+    var h = el.offsetHeight + 26;
+    var atBottom = nearBottom();
+    reserveSpaceForBanner(h);
+    if (atBottom) {
+      try { global.scrollBy(0, h); } catch (e) { /* 滚不动就算了，别影响提示 */ }
+    }
 
     if (bannerTimer) clearTimeout(bannerTimer);
     bannerTimer = setTimeout(hideSyncError, BANNER_MS);

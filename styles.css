@@ -1251,13 +1251,13 @@ select {
   display: flex;
   align-items: center;
   gap: 12px;
-  max-width: min(92vw, 460px);
-  padding: 10px 12px 10px 14px;
+  max-width: min(94vw, 460px);
+  padding: 9px 10px 9px 12px;
   border: 1px solid var(--danger);
   border-radius: var(--radius);
   background: var(--danger-bg);
   color: var(--ink);
-  font-size: 13px;
+  font-size: 12px;
   line-height: 1.5;
   box-shadow: var(--shadow);
 }
