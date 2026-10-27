@@ -48,6 +48,9 @@ const STATUS_WHITELIST = ["want", "reading", "finished"];
 // 超过基本是恶意/异常请求，直接拒收省得白耗内存
 const BODY_MAX_BYTES = 100 * 1024;
 
+// 单条笔记正文上限（Day 31）
+const NOTE_MAX = 2000;
+
 function send(res, payload) {
   // ⚠️ 这里故意【不】加 Access-Control-Allow-Origin —— 跨域由 HTTP 网关
   // 路由上的「跨域设置」负责（Day 17 起已启用，实测有效）。
@@ -260,6 +263,20 @@ function matchBookId(pathname) {
   }
   if (id.length > 40) return { error: "书 id 太长，最多 40 个字符" };
   return { id };
+}
+
+// 笔记路由解析（Day 31）：/api/notes/<id>
+// 返回 { notMatched } / { id } / { error }。有 error 就到此为止，绝不带着空 id 往下走。
+function matchNoteId(pathname) {
+  if (!pathname.startsWith("/api/notes/")) return { notMatched: true };
+  const raw = pathname.slice("/api/notes/".length).replace(/\/$/, "");
+  if (raw === "") return { error: "笔记 id 不能为空，正确写法：/api/notes/note-xxx" };
+  if (raw.includes("/")) return { error: "笔记 id 格式不对，不应该包含斜杠" };
+  try {
+    return { id: decodeURIComponent(raw) };
+  } catch {
+    return { error: "笔记 id 的编码格式不对" };
+  }
 }
 
 // PATCH 的字段校验：部分更新，只校验「传了的」字段，没传的一律不管。
@@ -625,7 +642,242 @@ const server = http.createServer((req, res) => {
   }
 
   // 备注：浏览器跨域 POST 会先发 OPTIONS 预检（网关跨域设置已覆盖，函数不用管）。
-  fail(res, "未知路径，本服务提供 GET/POST /api/books 与 PATCH/DELETE /api/books/:id");
+  // ================ 笔记（Day 31） ================
+  //
+  // 笔记不单独存 userId —— 它挂在书上（notes.bookId），书是谁的，笔记就是谁的。
+  // 所以每个笔记接口都要先回答一个问题：**这本书是我的吗**。
+  // 这道门是整块功能里唯一的安全边界，写错就等于谁都能看、能改别人的笔记。
+  if (url.pathname === "/api/notes" || url.pathname.startsWith("/api/notes/")) {
+    return requireUser(req, baseUrl, apiKey).then((auth) => {
+      if (auth.error) {
+        log(req.method, url.pathname, "401", auth.error);
+        return fail(res, auth.error);
+      }
+      const userId = auth.user.id;
+
+      // 这本书属于我吗？不属于就抛 NO_SUCH_BOOK，由各处统一翻成一句人话
+      const assertMine = (bookId) =>
+        db.findBookById(bookId, userId, baseUrl, apiKey).then((book) => {
+          if (!book) throw new Error("NO_SUCH_BOOK");
+          return book;
+        });
+
+      const notMine = (res2, method) => {
+        log(method, url.pathname, "404", "书不属于本人");
+        return fail(res2, "这本书不存在，或者不属于你");
+      };
+
+      // ---------- GET /api/notes ----------
+      // 带 bookId = 查一本书的笔记；不带 = 拉我的全部笔记（同步用）
+      if (req.method === "GET" && url.pathname === "/api/notes") {
+        const bookId = url.searchParams.get("bookId");
+
+        if (bookId) {
+          return assertMine(bookId)
+            .then(() => db.fetchNotesByBookId(bookId, baseUrl, apiKey))
+            .then((notes) => {
+              log("GET", "/api/notes", "200", `${bookId} 的笔记 ${notes.length} 条`);
+              send(res, { ok: true, data: { notes } });
+            })
+            .catch((err) => {
+              if (err.message === "NO_SUCH_BOOK") return notMine(res, "GET");
+              log("GET", "/api/notes", "500", err.message);
+              fail(res, describeError(err));
+            });
+        }
+
+        return db
+          .fetchBooks(undefined, userId, baseUrl, apiKey)
+          .then((books) => db.fetchNotesByBookIds(books.map((b) => b.id), baseUrl, apiKey))
+          .then((notes) => {
+            log("GET", "/api/notes", "200", `全量 ${notes.length} 条`);
+            send(res, { ok: true, data: { notes } });
+          })
+          .catch((err) => {
+            log("GET", "/api/notes", "500", err.message);
+            fail(res, describeError(err));
+          });
+      }
+
+      // ---------- POST /api/notes（新增） ----------
+      if (req.method === "POST" && url.pathname === "/api/notes") {
+        return readBody(req)
+          .then((raw) => {
+            let body;
+            try {
+              body = JSON.parse(raw);
+            } catch {
+              log("POST", "/api/notes", "400", "JSON 解析失败");
+              return fail(res, "请求体不是合法的 JSON");
+            }
+            if (typeof body.bookId !== "string" || body.bookId.trim() === "") {
+              log("POST", "/api/notes", "400", "bookId 为空");
+              return fail(res, "bookId 不能为空");
+            }
+            if (typeof body.content !== "string" || body.content.trim() === "") {
+              log("POST", "/api/notes", "400", "内容为空");
+              return fail(res, "笔记内容不能为空");
+            }
+            const content = body.content.trim();
+            if (content.length > NOTE_MAX) {
+              log("POST", "/api/notes", "400", "笔记太长");
+              return fail(res, `笔记太长了（最多 ${NOTE_MAX} 字）`);
+            }
+            let page = null;
+            if (body.page !== undefined && body.page !== null && body.page !== "") {
+              page = Number(body.page);
+              if (!Number.isInteger(page) || page < 0) {
+                log("POST", "/api/notes", "400", "页码非法");
+                return fail(res, "页码必须是非负整数");
+              }
+            }
+
+            const bookId = body.bookId.trim();
+            return assertMine(bookId)
+              .then(() => {
+                const now = new Date().toISOString();
+                const note = {
+                  id: newId("note"),
+                  bookId,
+                  content,
+                  page,
+                  createdAt: now,
+                  updatedAt: now,
+                };
+                return db.insertNote(note, baseUrl, apiKey).then(() => {
+                  log("POST", "/api/notes", "200", `新笔记 ${note.id} on ${bookId}`);
+                  send(res, { ok: true, data: { note } });
+                });
+              })
+              .catch((err) => {
+                if (err.message === "NO_SUCH_BOOK") return notMine(res, "POST");
+                log("POST", "/api/notes", "500", err.message);
+                fail(res, `写入失败：${describeError(err)}`);
+              });
+          })
+          .catch((err) => {
+            log("POST", "/api/notes", "400", err.message);
+            fail(res, err.message === "请求体太大" ? "请求体太大，请减小内容后重试" : "读取请求失败");
+          });
+      }
+
+      // ---------- PATCH / DELETE /api/notes/:id ----------
+      const mNote = matchNoteId(url.pathname);
+      if (mNote.notMatched) {
+        log(req.method, url.pathname, "404", "未知笔记路径");
+        return fail(res, "未知笔记路径，正确写法：/api/notes 或 /api/notes/<id>");
+      }
+      if (mNote.error) {
+        log(req.method, url.pathname, "400", mNote.error);
+        return fail(res, mNote.error);
+      }
+
+      if (req.method === "PATCH") {
+        return readBody(req)
+          .then((raw) => {
+            let body;
+            try {
+              body = JSON.parse(raw);
+            } catch {
+              log("PATCH", url.pathname, "400", "JSON 解析失败");
+              return fail(res, "请求体不是合法的 JSON");
+            }
+
+            const patch = {};
+            if (body.content !== undefined) {
+              if (typeof body.content !== "string" || body.content.trim() === "") {
+                log("PATCH", url.pathname, "400", "内容为空");
+                return fail(res, "笔记内容不能为空");
+              }
+              if (body.content.trim().length > NOTE_MAX) {
+                log("PATCH", url.pathname, "400", "笔记太长");
+                return fail(res, `笔记太长了（最多 ${NOTE_MAX} 字）`);
+              }
+              patch.content = body.content.trim();
+            }
+            if (body.page !== undefined) {
+              if (body.page === null || body.page === "") {
+                patch.page = null;
+              } else {
+                const n = Number(body.page);
+                if (!Number.isInteger(n) || n < 0) {
+                  log("PATCH", url.pathname, "400", "页码非法");
+                  return fail(res, "页码必须是非负整数");
+                }
+                patch.page = n;
+              }
+            }
+            if (Object.keys(patch).length === 0) {
+              log("PATCH", url.pathname, "400", "没有可改字段");
+              return fail(res, "没有可以修改的字段（只能改 content 和 page）");
+            }
+            patch.updatedAt = new Date().toISOString();
+
+            return db
+              .findNoteById(mNote.id, baseUrl, apiKey)
+              .then((note) => {
+                if (!note) {
+                  log("PATCH", url.pathname, "404", "笔记不存在");
+                  return fail(res, "这条笔记不存在");
+                }
+                return assertMine(note.bookId)
+                  .then(() => db.updateNote(mNote.id, patch, baseUrl, apiKey))
+                  .then((updated) => {
+                    if (!updated) {
+                      log("PATCH", url.pathname, "404", "更新影响 0 行");
+                      return fail(res, "这条笔记不存在");
+                    }
+                    log("PATCH", url.pathname, "200", `改 ${mNote.id}`);
+                    send(res, { ok: true, data: { note: updated } });
+                  });
+              })
+              .catch((err) => {
+                if (err.message === "NO_SUCH_BOOK") return notMine(res, "PATCH");
+                log("PATCH", url.pathname, "500", err.message);
+                fail(res, `修改失败：${describeError(err)}`);
+              });
+          })
+          .catch((err) => {
+            log("PATCH", url.pathname, "400", err.message);
+            fail(res, err.message === "请求体太大" ? "请求体太大" : "读取请求失败");
+          });
+      }
+
+      if (req.method === "DELETE") {
+        return db
+          .findNoteById(mNote.id, baseUrl, apiKey)
+          .then((note) => {
+            if (!note) {
+              log("DELETE", url.pathname, "404", "笔记不存在");
+              return fail(res, "这条笔记不存在");
+            }
+            return assertMine(note.bookId)
+              .then(() => db.deleteNoteById(mNote.id, baseUrl, apiKey))
+              .then((n) => {
+                if (n === 0) {
+                  log("DELETE", url.pathname, "404", "删除影响 0 行");
+                  return fail(res, "这条笔记不存在");
+                }
+                log("DELETE", url.pathname, "200", `删 ${mNote.id}`);
+                send(res, { ok: true, data: { deletedNotes: n } });
+              });
+          })
+          .catch((err) => {
+            if (err.message === "NO_SUCH_BOOK") return notMine(res, "DELETE");
+            log("DELETE", url.pathname, "500", err.message);
+            fail(res, `删除失败：${describeError(err)}`);
+          });
+      }
+
+      log(req.method, url.pathname, "405", "笔记接口方法不支持");
+      return fail(res, `笔记接口不支持 ${req.method}，可用：GET / POST /api/notes、PATCH / DELETE /api/notes/:id`);
+    });
+  }
+
+  fail(
+    res,
+    "未知路径，本服务提供 GET/POST /api/books、PATCH/DELETE /api/books/:id、GET/POST /api/notes、PATCH/DELETE /api/notes/:id"
+  );
   log(req.method, url.pathname, "404", "未知路径");
 });
 

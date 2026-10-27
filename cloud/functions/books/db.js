@@ -258,6 +258,103 @@ async function findUserById(id, baseUrl, apiKey) {
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+// ---------------------------------------------------------------- 笔记（Day 31）
+//
+// 笔记不单独存 userId —— 它挂在书上（notes.bookId），书属于谁，笔记就属于谁。
+// 所以每个笔记接口都要先确认「这本书是我的」，这一步在接口层做（这里只查不管）。
+
+/** 某本书的全部笔记，按创建时间倒序。 */
+async function fetchNotesByBookId(bookId, baseUrl, apiKey) {
+  if (!bookId) throw new Error("fetchNotesByBookId 缺少 bookId，已中止");
+  const params = new URLSearchParams({
+    select: "*",
+    bookId: `eq.${bookId}`,
+    order: "createdAt.desc",
+  });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes?${params}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows : [];
+}
+
+/**
+ * 一批书下面的全部笔记（同步时用：先拿到"我的书"的 id 列表，再一次性取笔记）。
+ * bookIds 为空直接返回空数组 —— 绝不能下发 in.() 空条件，那等于查全表。
+ */
+async function fetchNotesByBookIds(bookIds, baseUrl, apiKey) {
+  if (!Array.isArray(bookIds) || bookIds.length === 0) return [];
+  const params = new URLSearchParams({
+    select: "*",
+    bookId: `in.(${bookIds.join(",")})`,
+    order: "createdAt.desc",
+  });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes?${params}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows : [];
+}
+
+async function findNoteById(id, baseUrl, apiKey) {
+  if (!id) throw new Error("findNoteById 缺少 id，已中止");
+  const params = new URLSearchParams({ select: "*", id: `eq.${id}`, limit: "1" });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes?${params}`, {
+    headers: { Authorization: `Bearer ${apiKey}` },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
+async function insertNote(row, baseUrl, apiKey) {
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify(row),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+}
+
+/** 改一条笔记，返回改后那一行；0 行受影响返回 null。 */
+async function updateNote(id, patch, baseUrl, apiKey) {
+  if (!id) throw new Error("updateNote 缺少 id，已中止");
+  const params = new URLSearchParams({ id: `eq.${id}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes?${params}`, {
+    method: "PATCH",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(patch),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
+}
+
+/** 删一条笔记，返回真实删掉的行数（0 = 本来就不存在）。 */
+async function deleteNoteById(id, baseUrl, apiKey) {
+  if (!id) throw new Error("deleteNoteById 缺少 id，已中止");
+  const params = new URLSearchParams({ id: `eq.${id}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/notes?${params}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${apiKey}`, Prefer: "return=representation" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
 module.exports = {
   fetchBooks,
   findDuplicate,
@@ -269,4 +366,10 @@ module.exports = {
   deleteBook,
   findSessionByToken,
   findUserById,
+  fetchNotesByBookId,
+  fetchNotesByBookIds,
+  findNoteById,
+  insertNote,
+  updateNote,
+  deleteNoteById,
 };

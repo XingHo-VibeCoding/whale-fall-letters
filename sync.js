@@ -148,6 +148,20 @@
   }
 
   /**
+   * 拉云端全部笔记（Day 31）。
+   * 不带 bookId 时后端返回「我的所有笔记」——因为笔记挂在书上，书属于谁笔记就属于谁。
+   */
+  function fetchAllNotes() {
+    return request('GET', '/api/notes').then(function (res) {
+      var notes = res && res.data && res.data.notes;
+      if (!notes || Object.prototype.toString.call(notes) !== '[object Array]') {
+        throw apiError('parse', '返回里没有 notes 数组');
+      }
+      return notes;
+    });
+  }
+
+  /**
    * 读本地那份（只读）。
    * 注意：这里**不写** localStorage —— 本版不碰任何数据。
    * 以后要写，走 store.js 新增的导出，不要在 sync.js 里直接改存储键。
@@ -241,6 +255,24 @@
     } catch (e) {
       return [];
     }
+  }
+
+  /**
+   * 书换了 id（本地临时 id → 云端 id）之后，挂在它下面的笔记必须跟着换。
+   * 不换的后果：笔记指向一个不存在的书，界面上笔记就"消失"了（数据还在，只是挂空了）。
+   * 这是 Day 29 迁移时踩过的坑，新增书时同样会遇到。
+   */
+  function remapNotesOfBook(oldId, newId) {
+    if (!oldId || !newId || oldId === newId) return 0;
+    var S = global.Store;
+    if (!S || typeof S.replaceNotes !== 'function') return 0;
+    var all = readLocalNotes();
+    var n = 0;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].bookId === oldId) { all[i].bookId = newId; n++; }
+    }
+    if (n > 0) S.replaceNotes(all);
+    return n;
   }
 
   /**
@@ -544,7 +576,10 @@
       if (list.data[i].id === localId) { list.data[i] = serverBook; hit = true; break; }
     }
     if (!hit) return false;
-    return S.replaceBooks(list.data).ok;
+    if (!S.replaceBooks(list.data).ok) return false;
+    // ★ 书 id 变了，笔记的 bookId 也要跟着改（否则笔记挂空）
+    remapNotesOfBook(localId, serverBook.id);
+    return true;
   }
 
   // 接线前的原始方法。回滚必须走这里，绝不能走被包过的 Store.xxx。
@@ -555,6 +590,8 @@
   //    结果：本地剩一本、failed 计数变成 2、报错文案显示成「删除」。
   //    一句话：**回滚动作不能被自己的监听器捕获。**
   var origMethods = { add: null, update: null, del: null };
+  // 笔记的三个原始方法，作用同上（回滚不能被自己的监听器捕获）
+  var origNoteMethods = { add: null, update: null, del: null };
 
   /**
    * 把某本书恢复成本地快照（回滚用）。
@@ -624,6 +661,76 @@
     });
   }
 
+  /* -------------------------------------------------------------- 笔记（Day 31） */
+
+  /** 把本地那条笔记换成服务端返回的（拿到真 id 和时间戳）。 */
+  function adoptServerNote(localId, serverNote) {
+    var S = global.Store;
+    if (!S || !serverNote || typeof S.replaceNotes !== 'function') return false;
+    var all = readLocalNotes();
+    var hit = false;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].id === localId) { all[i] = serverNote; hit = true; break; }
+    }
+    if (!hit) return false;
+    return S.replaceNotes(all).ok;
+  }
+
+  /** 把某条笔记恢复成本地快照（回滚用）。找不到就放回最前面。 */
+  function restoreNote(snapshot) {
+    if (!snapshot || !snapshot.id) return false;
+    var S = global.Store;
+    if (!S || typeof S.replaceNotes !== 'function') return false;
+    var all = readLocalNotes();
+    var hit = false;
+    for (var i = 0; i < all.length; i++) {
+      if (all[i].id === snapshot.id) { all[i] = snapshot; hit = true; break; }
+    }
+    if (!hit) all.unshift(snapshot);
+    return S.replaceNotes(all).ok;
+  }
+
+  function pushNoteAdd(localNote) {
+    return enqueue(function () {
+      return request('POST', '/api/notes', {
+        bookId: localNote.bookId,
+        content: localNote.content,
+        page: localNote.page === undefined ? null : localNote.page,
+      }).then(function (res) {
+        var serverNote = res && res.data && res.data.note;
+        if (serverNote) adoptServerNote(localNote.id, serverNote);
+        return serverNote;
+      }, function (err) {
+        // 回滚走原始 deleteNote —— 不能走被包过的那个（否则回滚又发一次请求）
+        var del = origNoteMethods.del;
+        if (del) del.call(global.Store, localNote.id);
+        throw err;
+      });
+    });
+  }
+
+  function pushNoteUpdate(noteId, patch, before) {
+    return enqueue(function () {
+      return request('PATCH', '/api/notes/' + encodeURIComponent(noteId), patch).then(function (res) {
+        return res && res.data && res.data.note;
+      }, function (err) {
+        restoreNote(before);
+        throw err;
+      });
+    });
+  }
+
+  function pushNoteDelete(noteId, before) {
+    return enqueue(function () {
+      return request('DELETE', '/api/notes/' + encodeURIComponent(noteId)).then(function (res) {
+        return res && res.data;
+      }, function (err) {
+        restoreNote(before);
+        throw err;
+      });
+    });
+  }
+
   /* -------------------------------------------------------------- 接线 */
 
   /**
@@ -645,6 +752,12 @@
     var origUpdate = S.updateBook;
     var origDelete = S.deleteBook;
     var origGet = S.getBook;
+    var origNoteAdd = S.addNote;
+    var origNoteUpdate = S.updateNote;
+    var origNoteDelete = S.deleteNote;
+    origNoteMethods.add = origNoteAdd;
+    origNoteMethods.update = origNoteUpdate;
+    origNoteMethods.del = origNoteDelete;
 
     // 存下来给回滚用（回滚不能被自己的监听器捕获）
     origMethods.add = origAdd;
@@ -688,6 +801,42 @@
       var r = origDelete(bookId);                   // 先本地
       if (r && r.ok) {
         pushDelete(bookId, before).then(null, function (e) { report(e, '删除'); });
+      }
+      return r;
+    };
+
+    // ---------- 笔记（Day 31） ----------
+    // 和书单同一套规矩：先本地（同步返回，界面立刻有反馈），再推云端；推失败就把本地恢复原样。
+    S.addNote = function (input) {
+      var r = origNoteAdd(input);
+      if (r && r.ok) {
+        pushNoteAdd(r.data).then(null, function (e) { report(e, '添加笔记'); });
+      }
+      return r;
+    };
+
+    S.updateNote = function (noteId, patch) {
+      var all = readLocalNotes();
+      var before = null;
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].id === noteId) { before = JSON.parse(JSON.stringify(all[i])); break; }
+      }
+      var r = origNoteUpdate(noteId, patch);
+      if (r && r.ok) {
+        pushNoteUpdate(noteId, patch, before).then(null, function (e) { report(e, '修改笔记'); });
+      }
+      return r;
+    };
+
+    S.deleteNote = function (noteId) {
+      var all = readLocalNotes();
+      var before = null;
+      for (var i = 0; i < all.length; i++) {
+        if (all[i].id === noteId) { before = JSON.parse(JSON.stringify(all[i])); break; }
+      }
+      var r = origNoteDelete(noteId);
+      if (r && r.ok) {
+        pushNoteDelete(noteId, before).then(null, function (e) { report(e, '删除笔记'); });
       }
       return r;
     };
@@ -907,7 +1056,14 @@
     enable();                       // installHooks 要求 enabled，顺序不能反
     var hooked = installHooks();
 
-    return fetchAll().then(function (books) {
+    // 书和笔记一起拉：书是笔记的前提（笔记挂在 bookId 上），所以书先到、笔记后到。
+    // 笔记拉失败不该拖垮整个启动 —— 书能用就先让书能用。
+    return Promise.all([
+      fetchAll(),
+      fetchAllNotes().then(null, function () { return null; }),
+    ]).then(function (both) {
+      var books = both[0];
+      var notes = both[1];             // null = 笔记没拉到，保持本地不动
       var Store = global.Store;
       if (!Store || typeof Store.replaceBooks !== 'function') {
         return { started: true, hooked: hooked, pulled: 0, reason: 'store-cannot-write' };
@@ -923,8 +1079,13 @@
       if (!w || !w.ok) {
         return { started: true, hooked: hooked, pulled: 0, reason: 'cache-write-failed' };
       }
+      var pulledNotes = 0;
+      if (notes && typeof Store.replaceNotes === 'function') {
+        var wn = Store.replaceNotes(notes);
+        if (wn && wn.ok) pulledNotes = notes.length;
+      }
       refreshListIfVisible();       // 界面可能已经画完了旧数据，得重画
-      return { started: true, hooked: hooked, pulled: books.length };
+      return { started: true, hooked: hooked, pulled: books.length, pulledNotes: pulledNotes };
     }, function (err) {
       // 失败分支：本地缓存保持原样，只把原因显示出来
       status.lastError = err;
