@@ -290,6 +290,24 @@
     });
   }
 
+  /**
+   * 某个人的书单缓存（Day 31）。
+   *
+   * 为什么要单独缓存：个人主页每渲染一次都去拉一次太浪费，
+   * 而 renderProfile 里"拉到数据后重画自己"这个做法，没有缓存会变成无限递归。
+   */
+  var bookCache = {};
+
+  /** 拉某人的书单（公开信息，不用登录也能看）。 */
+  function loadUserBooks(userId) {
+    if (bookCache[userId]) return Promise.resolve(bookCache[userId]);
+    return authRequest('GET', '/api/auth/users/' + encodeURIComponent(userId) + '/books').then(function (data) {
+      var list = (data && data.books) || [];
+      bookCache[userId] = list;
+      return list;
+    });
+  }
+
   /* ------------------------------------------------ 私信（Day 30 第三阶段） */
 
   /**
@@ -366,6 +384,9 @@
    */
   function clearUserScopedCache() {
     MOCK_CONVERSATIONS.length = 0;
+    // 别人书单的缓存也一起清 —— 换了人之后，之前缓存的那些书单可能已经不是最新的了
+    var ids = Object.keys(bookCache);
+    for (var i = 0; i < ids.length; i++) delete bookCache[ids[i]];
   }
 
   /**
@@ -2472,16 +2493,30 @@
    * ============================================================= */
 
   // 书单区块：把 {want/reading/finished/favorite} 渲染成四行
-  function buildShelves(user) {
+  /**
+   * 书单区块（Day 31 改造）。
+   *
+   * 以前读 `user.shelves` —— 那个字段只有 MOCK_USERS 里那三个假人才有，
+   * 所以真用户的个人主页里这块**永远是空的**（连自己看自己都是空的）。
+   * 现在改成吃真书单，按 status 分三类。
+   *
+   * 「喜欢」那一行去掉了：它只存在于假数据里，
+   * 真实的 books 表只有 want / reading / finished 三种状态，留着这行只会一直显示"暂无"。
+   */
+  function buildShelves(books) {
     var box = document.createElement('div');
     box.className = 'shelves';
-    var shelves = user && user.shelves ? user.shelves : { want: [], reading: [], finished: [], favorite: [] };
+
+    var groups = { reading: [], want: [], finished: [] };
+    for (var k = 0; k < (books || []).length; k++) {
+      var b = books[k];
+      if (groups[b.status]) groups[b.status].push(b.title);
+    }
 
     var defs = [
       { key: 'reading', label: '在读', icon: '📖' },
       { key: 'want', label: '想读', icon: '🔖' },
-      { key: 'finished', label: '已读', icon: '✅' },
-      { key: 'favorite', label: '喜欢', icon: '❤️' }
+      { key: 'finished', label: '已读', icon: '✅' }
     ];
     for (var i = 0; i < defs.length; i++) {
       var row = document.createElement('div');
@@ -2492,7 +2527,7 @@
       row.appendChild(lab);
       var val = document.createElement('span');
       val.className = 'shelf-books';
-      var list = shelves[defs[i].key] || [];
+      var list = groups[defs[i].key] || [];
       val.textContent = list.length ? list.join('、') : '（暂无）';
       row.appendChild(val);
       box.appendChild(row);
@@ -2730,7 +2765,15 @@
     st.textContent = '我的书单';
     sh.appendChild(st);
     shelfBox.appendChild(sh);
-    shelfBox.appendChild(buildShelves(me));
+    // 书单（本人）—— 直接用本地那份。
+    // 本地书单和云端是同步的（sync.js 负责），比自己再去接口拉一次又快又准；
+    // 而且用户刚在书单页加的书，这里立刻就能看到。
+    var myBooks = [];
+    if (typeof Store !== 'undefined' && Store && typeof Store.listBooks === 'function') {
+      var mb = Store.listBooks();
+      if (mb && mb.ok) myBooks = mb.data || [];
+    }
+    shelfBox.appendChild(buildShelves(myBooks));
     box.appendChild(shelfBox);
 
     // 帖子 + 评论
@@ -2778,7 +2821,9 @@
 
     box.appendChild(buildBioCard(user, false));
 
-    // 书单
+    // 书单（Day 31）：有缓存就先画，没有就去拉真数据、拉到后重画整页。
+    // 用 bookCache 有没有值来避免递归：重画时缓存已在，不会再触发一次加载。
+    var cachedBooks = bookCache[user.id];
     var shelfBox = document.createElement('div');
     shelfBox.className = 'box';
     var sh = document.createElement('div');
@@ -2788,11 +2833,21 @@
     st.textContent = user.username + ' 的书单';
     sh.appendChild(st);
     shelfBox.appendChild(sh);
-    shelfBox.appendChild(buildShelves(user));
+    shelfBox.appendChild(buildShelves(cachedBooks || []));
     box.appendChild(shelfBox);
 
     // 帖子 + 评论
     box.appendChild(buildActivity(user.id));
+
+    if (!cachedBooks) {
+      loadUserBooks(user.id).then(
+        function () {
+          // 已经切到别人主页了就不重画，免得在人家页面里闪一下
+          if (state.profileUserId === user.id) renderProfile(user);
+        },
+        function () { /* 拉不到就保持空的，不打扰用户 */ }
+      );
+    }
   }
 
   /* =============================================================

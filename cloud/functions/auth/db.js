@@ -71,6 +71,33 @@ async function findUserById(id, baseUrl, apiKey) {
   return Array.isArray(rows) && rows.length > 0 ? rows[0] : null;
 }
 
+/**
+ * 查某个人的书单（Day 31）。
+ *
+ * 为什么放在 auth 函数里：`/api/auth/users/:id/books` 属于 `/api/auth` 前缀，
+ * 复用现有路由就行，不用再开一条网关路由。
+ *
+ * ⚠️ 这是**公开**查询（不需要 token）—— 公开阅读社区里，别人的书架本来就是给人看的。
+ *    但只返回书单本身（书名/作者/状态），不含任何账号敏感字段。
+ */
+async function fetchBooksByUserId(userId, baseUrl, apiKey) {
+  if (!userId) throw new Error("fetchBooksByUserId 缺少 userId，已中止");
+
+  const params = new URLSearchParams({
+    select: "id,title,author,coverUrl,status,createdAt",
+    userId: `eq.${userId}`,
+    is_deleted: "eq.false",
+    order: "createdAt.desc",
+  });
+  const resp = await fetch(restUrl(baseUrl, "books", params), {
+    headers: headers(apiKey),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows : [];
+}
+
 /** 按 token 查会话。没查到返回 null（token 不存在 = 没登录/已退出）。 */
 async function findSession(token, baseUrl, apiKey) {
   if (!token) throw new Error("findSession 缺少 token，已中止");
@@ -158,4 +185,5 @@ module.exports = {
   insertSession,
   deleteSession,
   deleteExpiredSessions,
+  fetchBooksByUserId,
 };

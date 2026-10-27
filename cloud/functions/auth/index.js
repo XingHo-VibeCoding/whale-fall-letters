@@ -440,6 +440,45 @@ const server = http.createServer((req, res) => {
     return;
   }
 
+  // ---------- GET /api/auth/users/:id/books（查某人的书单，公开） ----------
+  //
+  // ⚠️ 必须放在下面的 /api/auth/users/:id 之前 —— 那个分支遇到带斜杠的会直接判"格式不对"，
+  //    顺序反了这个接口永远进不来。
+  //
+  // 公开接口：公开阅读社区里，别人的书架本来就是给人看的（像豆瓣）。
+  // 但只返回书单本身（书名/作者/状态/封面），不带任何账号敏感字段。
+  if (req.method === "GET" && /^\/api\/auth\/users\/[^/]+\/books\/?$/.test(url.pathname)) {
+    const raw = url.pathname.slice("/api/auth/users/".length).replace(/\/?books\/?$/, "");
+    let userId;
+    try {
+      userId = decodeURIComponent(raw);
+    } catch {
+      log("GET", url.pathname, "400", "id 编码格式不对");
+      return fail(res, "用户 id 的编码格式不对");
+    }
+    if (!userId) {
+      log("GET", url.pathname, "400", "用户 id 为空");
+      return fail(res, "用户 id 不能为空");
+    }
+
+    db.findUserById(userId, baseUrl, apiKey)
+      .then((user) => {
+        if (!user) {
+          log("GET", url.pathname, "404", "用户不存在");
+          return fail(res, "这个用户不存在");
+        }
+        return db.fetchBooksByUserId(userId, baseUrl, apiKey).then((books) => {
+          log("GET", url.pathname, "200", `${user.username} 的书单 ${books.length} 本`);
+          send(res, { ok: true, data: { books } });
+        });
+      })
+      .catch((err) => {
+        log("GET", url.pathname, "500", err.message);
+        fail(res, describeError(err));
+      });
+    return;
+  }
+
   // ---------- GET /api/auth/users/:id（查任意用户的公开资料） ----------
   //
   // 为什么放在 auth 函数而不是新开一个：
