@@ -49,6 +49,10 @@ const CFG = {
     "id", "title", "author", "coverUrl", "status", "totalPages",
     "currentPage", "startedAt", "finishedAt", "createdAt", "is_deleted",
   ],
+  // Day 31：书单按人隔离之后，读写都要登录凭证。
+  // 有 token 就带上，没 token 时第 5 条会降级、第 6 条直接跳过（不假装通过）。
+  // 用法：PREFLIGHT_TOKEN=xxxx node preflight.js
+  token: (process.env.PREFLIGHT_TOKEN || "").trim(),
 };
 
 const HTTP_META = "\n__PREFLIGHT_HTTP_STATUS__";
@@ -159,6 +163,7 @@ function curlFile(url, dest) {
 /** 跑一次 curl 拿 JSON，返回状态码 + 解析后的 body */
 function curlJson(method, url, bodyObj) {
   const args = ["--ssl-no-revoke", "-sS", "-m", "25", "-X", method, "-w", HTTP_FORMAT];
+  if (CFG.token) args.push("-H", "Authorization: Bearer " + CFG.token);
   if (bodyObj !== undefined) {
     // 用文件传 body：命令行直接带中文 JSON 在 Windows 上会被编码搞坏
     const bf = tmpFile("body.json");
@@ -356,6 +361,15 @@ function check5_api() {
   const r = curlJson("GET", `${CFG.apiBase}/api/books`);
   if (r.status === 0) return { status: "FAIL", evidence: `接口连不上：${r.err || "curl 无返回"}` };
   if (r.status !== 200) return { status: "FAIL", evidence: `GET /api/books 返回 HTTP ${r.status}：${brief(r.text, 80)}` };
+  // Day 31：书单要登录了。没给 token 却拿到「请先登录」，
+  // 说明函数活着、鉴权也在工作 —— 这是"链路通"的证据，不是故障。
+  // 但数据内容（几本书、字段齐不齐）验不了，如实写在证据里。
+  if (!CFG.token && r.body && r.body.ok === false && /请先登录/.test(String(r.body.error || ""))) {
+    return {
+      status: "PASS",
+      evidence: "HTTP 200，匿名访问被正确拦下（鉴权在工作）；未提供 PREFLIGHT_TOKEN，未验证数据内容",
+    };
+  }
   if (!r.body || r.body.ok !== true) return { status: "FAIL", evidence: `HTTP 200 但 ok 不为 true：${brief(r.text, 80)}` };
 
   const books = r.body.data && r.body.data.books;
@@ -363,7 +377,13 @@ function check5_api() {
     return { status: "FAIL", evidence: `返回体没有 data.books 数组（拿到 ${Object.keys(r.body.data || {})}）` };
   }
   if (books.length === 0) {
-    return { status: "FAIL", evidence: `data.books 是空数组（0 本）——真库应该有数据` };
+    // Day 31：书单按人隔离之后，"查到 0 本"是完全正常的状态 ——
+    // 新注册的人当然一本书都没有。这一条验的是「链路通、鉴权过、返回结构对」，
+    // 不该把"有几本书"当发布门槛：那取决于你拿谁的账号去看。
+    return {
+      status: "PASS",
+      evidence: "HTTP 200，鉴权通过，data.books 是数组（该账号书单为空，按人隔离后属正常）",
+    };
   }
 
   // 字段齐全性：所有书的 key 并集要覆盖 11 个字段
@@ -382,6 +402,14 @@ function check5_api() {
 
 /** 6. 迁移与代码对齐（会写真库，临时书带 preflight- 前缀，finally 必删） */
 function check6_migration() {
+  // Day 31：这一条要写真库（建临时书 → 删 → 再删），没登录凭证做不了。
+  // 不硬跑、也不假装通过 —— 标成 SKIP 并说清怎么补上。
+  if (!CFG.token) {
+    return {
+      status: "SKIP",
+      evidence: "需要登录才能写书，未提供 PREFLIGHT_TOKEN 故跳过（设好 env 再跑可完整验证）",
+    };
+  }
   const steps = [];
   const title = `preflight-${Date.now()}`;
   let createdId = null;
@@ -623,8 +651,10 @@ function main() {
   const results = [];
   for (const s of steps) {
     const r = s.fn(isDraft);
-    const ok = r.status === "PASS";
-    const tag = ok ? paint("green", "✓ PASS") : paint("red", "✗ FAIL");
+    const tag =
+      r.status === "PASS" ? paint("green", "✓ PASS")
+      : r.status === "SKIP" ? paint("yellow", "○ SKIP")
+      : paint("red", "✗ FAIL");
     console.log("  " + padV(s.no, 4) + padV(s.layer, 6) + padV(s.name, 22) + padV(tag, 8 + (isTTY ? 9 : 0)) + r.evidence);
     results.push({ ...s, ...r });
   }
@@ -634,12 +664,13 @@ function main() {
   }
 
   const passed = results.filter((r) => r.status === "PASS").length;
+  const skipped = results.filter((r) => r.status === "SKIP").length;
   const failed = results.filter((r) => r.status === "FAIL");
   const elapsed = ((Date.now() - startedAt) / 1000).toFixed(1);
 
   console.log("  " + "─".repeat(74));
   console.log(
-    `  通过 ${paint("green", `${passed}/${results.length}`)} · 未通过 ${failed.length ? paint("red", String(failed.length)) : "0"} · 人工 ${MANUAL.length} · 耗时 ${elapsed}s`
+    `  通过 ${paint("green", `${passed}/${results.length}`)} · 跳过 ${skipped} · 未通过 ${failed.length ? paint("red", String(failed.length)) : "0"} · 人工 ${MANUAL.length} · 耗时 ${elapsed}s`
   );
 
   if (failed.length) {
