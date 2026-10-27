@@ -220,6 +220,85 @@ async function markThreadRead(meId, peerId, nowIso, baseUrl, apiKey) {
   return Array.isArray(rows) ? rows.length : 0;
 }
 
+// ---------------------------------------------------------------- 评论点赞（Day 31）
+
+/**
+ * 算一批评论各有几个赞，返回 { [commentId]: 数字 }。
+ * 一次查询把该帖所有点赞记录拉下来在内存里数 —— 比给每条评论发一次 count 划算。
+ */
+async function countLikesByCommentIds(commentIds, baseUrl, apiKey) {
+  const out = {};
+  if (!commentIds || commentIds.length === 0) return out;
+  const rows = await getRows(
+    "comment_likes",
+    { select: "commentId", commentId: `in.(${commentIds.join(",")})` },
+    baseUrl,
+    apiKey
+  );
+  for (const r of rows) out[r.commentId] = (out[r.commentId] || 0) + 1;
+  return out;
+}
+
+/**
+ * 这批评论里，**我**赞过哪些。
+ * 没登录（userId 为空）直接返回空集合 —— 不是错误，是"谁都不是"。
+ */
+async function fetchMyLikedCommentIds(userId, commentIds, baseUrl, apiKey) {
+  if (!userId || !commentIds || commentIds.length === 0) return [];
+  const rows = await getRows(
+    "comment_likes",
+    {
+      select: "commentId",
+      userId: `eq.${userId}`,
+      commentId: `in.(${commentIds.join(",")})`,
+    },
+    baseUrl,
+    apiKey
+  );
+  return rows.map((r) => r.commentId);
+}
+
+/** 加一个赞。重复点会撞复合主键（409），这里当成功处理 —— 目标状态已达成。 */
+async function insertLike(userId, commentId, nowIso, baseUrl, apiKey) {
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/comment_likes`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${apiKey}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ userId, commentId, createdAt: nowIso }),
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) {
+    if (resp.status === 409) return false; // 已经赞过
+    throw new Error(`数据源返回 HTTP ${resp.status}`);
+  }
+  return true;
+}
+
+/** 取消赞，返回真实删掉的行数（0 = 本来就没赞过）。 */
+async function deleteLike(userId, commentId, baseUrl, apiKey) {
+  if (!userId || !commentId) throw new Error("deleteLike 缺少参数，已中止");
+  const params = new URLSearchParams({ userId: `eq.${userId}`, commentId: `eq.${commentId}` });
+  const resp = await fetch(`${baseUrl}/v1/rdb/rest/comment_likes?${params}`, {
+    method: "DELETE",
+    headers: { Authorization: `Bearer ${apiKey}`, Prefer: "return=representation" },
+    signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS),
+  });
+  if (!resp.ok) throw new Error(`数据源返回 HTTP ${resp.status}`);
+  const rows = await resp.json();
+  return Array.isArray(rows) ? rows.length : 0;
+}
+
+/** 我到底赞没赞过这一条（拿来做 toggle 判断）。 */
+async function hasLiked(userId, commentId, baseUrl, apiKey) {
+  if (!userId || !commentId) return false;
+  const rows = await getRows(
+    "comment_likes",
+    { select: "userId", userId: `eq.${userId}`, commentId: `eq.${commentId}`, limit: "1" },
+    baseUrl,
+    apiKey
+  );
+  return rows.length > 0;
+}
+
 module.exports = {
   findSessionByToken,
   findUserById,
@@ -234,4 +313,9 @@ module.exports = {
   fetchThread,
   insertMessage,
   markThreadRead,
+  countLikesByCommentIds,
+  fetchMyLikedCommentIds,
+  insertLike,
+  deleteLike,
+  hasLiked,
 };

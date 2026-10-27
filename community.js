@@ -78,13 +78,8 @@
     '百年孤独': 342
   };
 
-  // 每条评论的点赞量（mock）。按评论 id 存；用户新发的评论不在表里，基数算 0。
-  // 显示出来的数 = 这里的基数 + 我自己点没点过（我是第 1 个赞就 +1）。
-  var MOCK_COMMENT_LIKES = {
-    'c1': 12,
-    'c2': 5,
-    'c3': 8
-  };
+  // Day 31：`MOCK_COMMENT_LIKES`（假点赞基数）已经删掉了。
+  // 点赞数现在由后端 comment_likes 表算出来，和 comment 一起返回。
 
   // 私信会话缓存（Day 30 第三阶段）
   //
@@ -1435,10 +1430,8 @@
   // 心形路径：宽 14、高约 13.8，中心 (10,10)
   var HEART_D = 'M10,16.8 C6.4,13.9 3,10.9 3,7.6 C3,5 5,3 7.4,3 C8.7,3 9.6,3.7 10,4.4 C10.4,3.7 11.3,3 12.6,3 C15,3 17,5 17,7.6 C17,10.9 13.6,13.9 10,16.8 Z';
 
-  function baseCommentLikes(commentId) {
-    var n = MOCK_COMMENT_LIKES[commentId];
-    return typeof n === 'number' ? n : 0;
-  }
+  // Day 31：点赞数不再有"假基数"，也不再读本地。
+  // `comment.likeCount` / `comment.likedByMe` 是后端算好一起返回的 —— 换台设备照样准。
 
   function likeIcon() {
     var svg = document.createElementNS(SVG_NS, 'svg');
@@ -1455,15 +1448,9 @@
     return svg;
   }
 
-  // 这条评论我赞过没有。readable=false 表示存储读不出来。
-  function likeStateOf(commentId) {
-    if (typeof Store === 'undefined' || !Store || typeof Store.listLikes !== 'function') {
-      return { readable: false, liked: false };
-    }
-    var res = Store.listLikes();
-    if (!res.ok) return { readable: false, liked: false };
-    var list = res.data || [];
-    return { readable: true, liked: list.indexOf(commentId) >= 0 };
+  // 这条评论我赞过没有 —— 直接看后端给的那个字段（Day 31 起不再查本机）
+  function likeStateOf(comment) {
+    return { readable: true, liked: !!(comment && comment.likedByMe) };
   }
 
   // 按钮的子节点顺序固定：0=图标 1=数字
@@ -1475,8 +1462,8 @@
    *               否则每次重渲染都会跟着弹（那是假反馈）。
    */
   function renderLikeButton(btn, comment, justOn) {
-    var st = likeStateOf(comment.id);
-    var count = baseCommentLikes(comment.id) + (st.liked ? 1 : 0);
+    var st = likeStateOf(comment);
+    var count = typeof comment.likeCount === 'number' ? comment.likeCount : 0;
     var cls = 'like-btn';
 
     if (st.liked) {
@@ -1536,37 +1523,35 @@
     if (e) { e.preventDefault(); e.stopPropagation(); }   // 别连带触发外层元素的点击
     if (btn.getAttribute('data-busy') === '1') return;    // ① 处理中不重复响应
 
-    var st = likeStateOf(comment.id);
-
-    // 存储读不出来：给失败提示，不静默失败
-    if (!st.readable) {
-      showError('点赞失败：读不到本地记录，浏览器存储可能被禁用或数据已损坏');
-      return;
-    }
+    // Day 31：点赞要登录了 —— 它现在是一条真实记录，得知道是谁点的
+    if (!state.currentUser) { go('/login'); return; }
 
     setLikeBusy(btn);
 
-    // 模拟一点处理耗时；接后端后这里就是真实的请求等待时间
-    setTimeout(function () {
-      var res;
-      try {
-        res = Store.toggleLike(comment.id);
-      } catch (err) {
-        // Store 若因存储写满等原因直接抛异常，这里兜住并转成看得懂的失败提示
-        // （store.js 开头的约定：错误不能静默）
-        res = { ok: false, error: '浏览器存储写入失败，可能是空间已满' };
-      }
-
-      clearLikeBusy(btn);
-      if (res.ok) {
-        renderLikeButton(btn, comment, res.data.liked);
+    // 一个 toggle 接口：赞过了就取消，没赞过就加上。
+    // 不先判断本地状态再决定调哪个 —— 那等于把并发问题推给客户端。
+    authRequest(
+      'POST',
+      '/api/posts/' + encodeURIComponent(comment.postId) +
+        '/comments/' + encodeURIComponent(comment.id) + '/like',
+      undefined,
+      loadToken()
+    ).then(
+      function (data) {
+        clearLikeBusy(btn);
+        // 后端回来的就是真相，直接覆盖本地这份
+        comment.likedByMe = !!(data && data.liked);
+        comment.likeCount = (data && data.likeCount) || 0;
+        renderLikeButton(btn, comment, comment.likedByMe);
         syncLikeButtons(comment.id, comment, btn);
         // 成功不弹提示条：心变红就在用户视线里，再弹一条反而吵（Step 3 定的口径）
-      } else {
+      },
+      function (err) {
+        clearLikeBusy(btn);
         renderLikeButton(btn, comment);   // 退回点击前的样子，让用户可重试
-        showError('点赞失败：' + res.error);
+        showError('点赞失败：' + ((err && err.message) || '请稍后重试'));
       }
-    }, 500);
+    );
   }
 
   /* ---------------------------------------------------------------

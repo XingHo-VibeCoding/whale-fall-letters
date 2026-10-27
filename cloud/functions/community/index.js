@@ -147,6 +147,17 @@ function matchPostsPath(pathname) {
 
   if (parts.length === 1) return { id };
   if (parts.length === 2 && parts[1] === "comments") return { id, comments: true };
+  // Day 31：/api/posts/:postId/comments/:commentId/like（点赞 / 取消赞）
+  if (parts.length === 4 && parts[1] === "comments" && parts[3] === "like") {
+    let commentId;
+    try {
+      commentId = decodeURIComponent(parts[2]);
+    } catch {
+      return { error: "评论 id 的编码格式不对" };
+    }
+    if (!commentId) return { error: "评论 id 不能为空" };
+    return { id, commentId, like: true };
+  }
   return { error: "路径格式不对，正确写法：/api/posts 或 /api/posts/<id> 或 /api/posts/<id>/comments" };
 }
 
@@ -226,7 +237,7 @@ function shapePost(row, userMap, commentCount) {
   };
 }
 
-function shapeComment(row, userMap) {
+function shapeComment(row, userMap, likeCount, likedByMe) {
   const u = (userMap && userMap[row.authorId]) || {};
   return {
     id: row.id,
@@ -236,6 +247,9 @@ function shapeComment(row, userMap) {
     authorAvatar: u.avatar || "",
     content: row.content,
     createdAt: row.createdAt,
+    // Day 31：点赞数改成后端算，不再存本地。刚发的评论默认 0，没赞过就是 false。
+    likeCount: likeCount || 0,
+    likedByMe: !!likedByMe,
   };
 }
 
@@ -534,12 +548,35 @@ const server = http.createServer((req, res) => {
         if (!pack) return; // 上面已经回过 404
         const { post, comments } = pack;
         const authorIds = [post.authorId].concat(comments.map((c) => c.authorId));
-        return db.fetchUsersByIds(authorIds, baseUrl, apiKey).then((userMap) => {
-          const shaped = shapePost(post, userMap, comments.length);
-          shaped.comments = comments.map((c) => shapeComment(c, userMap));
-          log("GET", url.pathname, "200", `帖子 ${post.id}，${comments.length} 条评论`);
-          send(res, { ok: true, data: { post: shaped } });
-        });
+        const commentIds = comments.map((c) => c.id);
+
+        // 可选身份：带了有效 token 就顺带算出"我赞过哪些"，没带就是都没赞过。
+        // 详情页是公开的，不能因为没登录就打不开 —— 所以这里不能强制 requireUser。
+        const token = readBearer(req);
+        const mePromise = token
+          ? db
+              .findSessionByToken(token, baseUrl, apiKey)
+              .then((s) => (s && String(s.expiresAt) > isoNow() ? s.userId : ""))
+              .catch(() => "")
+          : Promise.resolve("");
+
+        return Promise.all([
+          db.fetchUsersByIds(authorIds, baseUrl, apiKey),
+          db.countLikesByCommentIds(commentIds, baseUrl, apiKey),
+          mePromise,
+        ]).then(([userMap, likeCounts, meId]) =>
+          db.fetchMyLikedCommentIds(meId, commentIds, baseUrl, apiKey).then((mine) => {
+            const mineSet = {};
+            for (const id of mine) mineSet[id] = true;
+
+            const shaped = shapePost(post, userMap, comments.length);
+            shaped.comments = comments.map((c) =>
+              shapeComment(c, userMap, likeCounts[c.id], mineSet[c.id])
+            );
+            log("GET", url.pathname, "200", `帖子 ${post.id}，${comments.length} 条评论`);
+            send(res, { ok: true, data: { post: shaped } });
+          })
+        );
       })
       .catch((err) => {
         log("GET", url.pathname, "500", err.message);
@@ -601,6 +638,55 @@ const server = http.createServer((req, res) => {
   }
 
   // ---------- POST /api/posts/:id/comments（发评论，必须登录） ----------
+  // ---------- POST /api/posts/:id/comments/:cid/like（点赞 / 取消赞） ----------
+  //
+  // 一个接口做两件事（toggle）：赞过了就取消，没赞过就加上。
+  // 为什么不做成 POST/DELETE 两个接口：前端只有一个心眼按钮，点一下就该有一个结果，
+  // 让前端先判断"我赞过没"再决定调哪个，等于把并发问题推给客户端（连点两下就错）。
+  if (req.method === "POST" && m.id && m.like) {
+    return requireUser(req, baseUrl, apiKey).then((auth) => {
+      if (auth.error) {
+        log("POST", url.pathname, "401", auth.error);
+        return fail(res, auth.error);
+      }
+      const userId = auth.user.id;
+      const commentId = m.commentId;
+
+      // ★ 先确认这条评论真的挂在这篇帖子下面。
+      //   不查的话，可以拿 A 帖的 id + B 帖的评论 id 去点赞，等于绕过了帖子边界。
+      return db
+        .fetchCommentsByPostId(m.id, baseUrl, apiKey)
+        .then((comments) => {
+          const target = comments.find((c) => c.id === commentId);
+          if (!target) {
+            log("POST", url.pathname, "404", "评论不在该帖下");
+            return fail(res, "这条评论不存在");
+          }
+
+          return db.hasLiked(userId, commentId, baseUrl, apiKey).then((liked) => {
+            const step = liked
+              ? db.deleteLike(userId, commentId, baseUrl, apiKey)
+              : db.insertLike(userId, commentId, isoNow(), baseUrl, apiKey);
+
+            return step
+              .then(() => db.countLikesByCommentIds([commentId], baseUrl, apiKey))
+              .then((counts) => {
+                const nowLiked = !liked;
+                log("POST", url.pathname, "200", `${nowLiked ? "点赞" : "取消赞"} ${commentId}，共 ${counts[commentId] || 0}`);
+                send(res, {
+                  ok: true,
+                  data: { liked: nowLiked, likeCount: counts[commentId] || 0 },
+                });
+              });
+          });
+        })
+        .catch((err) => {
+          log("POST", url.pathname, "500", err.message);
+          fail(res, `点赞失败：${describeError(err)}`);
+        });
+    });
+  }
+
   if (req.method === "POST" && m.id && m.comments) {
     readBody(req)
       .then((raw) => {
