@@ -140,6 +140,19 @@
     try { window.localStorage.setItem(KEY_TOKEN, t); return true; } catch (e) { return false; }
   }
 
+  // Day 31：把「这台浏览器现在是谁在用」记下来。
+  // sync.js 靠它判断有没有换人 —— 换了人就必须先清掉本地书单和笔记，
+  // 否则 B 登录后会看到 A 的书。这个键只记 id，不是凭证，泄露也无害。
+  var KEY_UID = 'reading:uid';
+
+  function saveUid(id) {
+    try {
+      if (id) window.localStorage.setItem(KEY_UID, id);
+      else window.localStorage.removeItem(KEY_UID);
+      return true;
+    } catch (e) { return false; }
+  }
+
   function clearToken() {
     try { window.localStorage.removeItem(KEY_TOKEN); return true; } catch (e) { return false; }
   }
@@ -199,6 +212,7 @@
       function (data) {
         if (!data || !data.user) { clearToken(); return; }
         state.currentUser = data.user;
+        saveUid(data.user.id);
         state.avatarColor = null;
         state.avatarImage = null;
         updateNavUser();
@@ -2409,6 +2423,7 @@
           throw new Error('服务器没返回登录凭证，请稍后重试');
         }
         saveToken(data.token);          // 存起来，刷新后靠它自动登录
+        saveUid(data.user.id);          // ★ 记下这台机器现在是谁在用（sync.js 靠它判断换人）
         clearUserScopedCache();         // ★ 换账号前先清私信缓存，别把上一个人的对话留给下一个人
         state.currentUser = data.user;
         // 重置头像选择状态，避免下次注册残留
@@ -2617,6 +2632,7 @@
         state.currentUser = null;
         clearUserScopedCache();         // ★ 退出即清私信缓存
         clearToken();
+        saveUid(null);                  // 退出就把「谁在用」也清掉，别把身份留在机器上
         updateNavUser();
         go('/');
         // 后端删不掉也不打扰用户：本地凭证已经清了，这台机器上就是未登录状态。

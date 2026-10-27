@@ -48,6 +48,23 @@
     try { return global.localStorage.getItem(KEY_TOKEN) || ''; } catch (e) { return ''; }
   }
 
+  // ★ Day 31：多账号共用一台机器的记账本
+  //   reading:uid          —— 现在这台浏览器是谁在用（community.js 登录时写）
+  //   reading:books-owner  —— 本地这份书单和笔记是替谁缓存的（这里写）
+  // 两个不一样 = 换人了 = 必须先清本地，否则 B 会看到 A 的书。
+  var KEY_UID = 'reading:uid';
+  var KEY_OWNER = 'reading:books-owner';
+
+  function readUid() {
+    try { return global.localStorage.getItem(KEY_UID) || ''; } catch (e) { return ''; }
+  }
+  function readOwner() {
+    try { return global.localStorage.getItem(KEY_OWNER) || ''; } catch (e) { return ''; }
+  }
+  function writeOwner(id) {
+    try { global.localStorage.setItem(KEY_OWNER, id); return true; } catch (e) { return false; }
+  }
+
   // 接口基地址。允许外部覆盖，方便本地联调和以后换域名。
   // 注意用 service 域名：带地域段的那个时好时坏（Day 19/20 记录）。
   var API_BASE = typeof global.__SYNC_API_BASE__ === 'string' && global.__SYNC_API_BASE__
@@ -1053,6 +1070,21 @@
       if (!readToken()) return Promise.resolve({ started: false, reason: 'not-signed-in' });
     }
 
+    // ★ 换人了吗？换了就先清掉本地书单和笔记，再去拉云端。
+    //   不清的后果有两个，都很糟：
+    //     ① B 会在自己的书单里看到 A 的书；
+    //     ② 本地是"有书"状态，遇到云端为空时安全阀会拦住不让覆盖 —— 两头都错。
+    //   注意"首次登录"（owner 还没写过）不算换人，那时的本地数据本来就是这个人自己的。
+    var uid = readUid();
+    var owner = readOwner();
+    var switched = !!(uid && owner && owner !== uid);
+    if (switched) {
+      var S0 = global.Store;
+      if (S0 && typeof S0.replaceBooks === 'function') S0.replaceBooks([]);
+      if (S0 && typeof S0.replaceNotes === 'function') S0.replaceNotes([]);
+    }
+    if (uid) writeOwner(uid);
+
     enable();                       // installHooks 要求 enabled，顺序不能反
     var hooked = installHooks();
 
@@ -1085,7 +1117,13 @@
         if (wn && wn.ok) pulledNotes = notes.length;
       }
       refreshListIfVisible();       // 界面可能已经画完了旧数据，得重画
-      return { started: true, hooked: hooked, pulled: books.length, pulledNotes: pulledNotes };
+      return {
+        started: true,
+        hooked: hooked,
+        pulled: books.length,
+        pulledNotes: pulledNotes,
+        switched: switched,          // true = 这次是换了人，本地先被清空过
+      };
     }, function (err) {
       // 失败分支：本地缓存保持原样，只把原因显示出来
       status.lastError = err;
