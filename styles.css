@@ -1324,3 +1324,35 @@ select {
   margin: 0 0 10px;
   font-size: 13px;
 }
+
+/* ============================================================
+ * 站内确认弹窗的正文（Day 30）
+ * 容器直接用 .modal / .modal-card / .modal-foot，这里只补正文排版 ——
+ * 不重新定义外观，才能保证跟"添加书籍"那些弹窗长得一模一样。
+ * ============================================================ */
+.dialog-text {
+  margin: 0;
+  font-size: 14px;
+  line-height: 1.7;
+  color: var(--ink-soft);
+}
+
+/* ============================================================
+ * 键盘焦点统一可见（Day 30 修 M2）
+ * ------------------------------------------------------------
+ * 之前只有少数元素（添加书籍按钮、筛选档位）在 Tab 聚焦时有明显轮廓，
+ * 帖子卡片、点赞、收藏、私信项走一遍基本看不出焦点在哪儿。
+ *
+ * 用 :focus-visible 而不是 :focus —— 前者**只在键盘操作时**生效，
+ * 鼠标点按钮不会冒出一个多余的框。已有的更具体规则
+ * （比如 .forum-search input:focus-visible）不会被这条覆盖。
+ * ============================================================ */
+a:focus-visible,
+button:focus-visible,
+input:focus-visible,
+textarea:focus-visible,
+select:focus-visible,
+[tabindex]:focus-visible {
+  outline: 2px solid var(--accent, #6fd6c8);
+  outline-offset: 2px;
+}

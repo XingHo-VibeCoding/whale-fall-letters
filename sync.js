@@ -579,6 +579,21 @@
     for (var i = 0; i < keys.length; i++) {
       if (src && Object.prototype.hasOwnProperty.call(src, keys[i])) out[keys[i]] = src[keys[i]];
     }
+
+    // ★ Day 30 修：页数必须是**数字**。
+    // 表单里 input.value 永远是字符串（"320"），而服务端校验是 Number.isInteger，
+    // 直接发字符串会被拒 —— 表现就是「改了半天，一刷新又变回没填」。
+    // 本地之所以看着正常，是因为 Store 内部自己转过一次；sync 推的是调用方给的原始值。
+    // 这里统一再转一次，不管上游传的是字符串还是数字。
+    ['totalPages', 'currentPage'].forEach(function (k) {
+      if (!Object.prototype.hasOwnProperty.call(out, k)) return;
+      var v = out[k];
+      if (v === null || v === undefined || v === '') { out[k] = null; return; }
+      var n = Number(v);
+      // 真的是数字就转，不是就原样传下去，让后端返回那句中文错误
+      out[k] = (isFinite(n) && Math.floor(n) === n) ? n : v;
+    });
+
     return out;
   }
 

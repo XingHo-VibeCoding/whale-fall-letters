@@ -1046,6 +1046,11 @@
     var card = document.createElement('article');
     card.className = 'post-card';
     card.setAttribute('data-id', post.id);
+    // Day 30 修 M2：卡片是 <article>，Tab 根本到不了 —— 键盘用户打不开帖子。
+    // 加 tabindex + role，再用下面的 keydown 补上回车/空格，行为就和一个按钮一样了。
+    card.setAttribute('tabindex', '0');
+    card.setAttribute('role', 'button');
+    card.setAttribute('aria-label', '打开帖子：' + (post.title || '无标题'));
 
     var cover = document.createElement('div');
     cover.className = 'cover cover-sm';
@@ -2914,6 +2919,18 @@
     });
 
     // 帖子流点击进详情（收藏按钮自己处理，别连带跳进详情页）
+    // Day 30：Tab 到卡片后，回车或空格也能打开（和点一下等效）
+    byId('post-list').addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' && e.key !== ' ') return;
+      // 卡片里的子按钮（收藏、作者名）有自己的处理，别抢它们的键
+      if (e.target.closest && e.target.closest('button, a')) return;
+      var card = e.target.closest ? e.target.closest('.post-card') : null;
+      if (!card) return;
+      e.preventDefault();
+      var pid = card.getAttribute('data-id');
+      if (pid) openPost(pid);
+    });
+
     byId('post-list').addEventListener('click', function (e) {
       if (e.target.closest && e.target.closest('.fav-btn')) return;
       var card = e.target.closest ? e.target.closest('.post-card') : null;

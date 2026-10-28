@@ -593,6 +593,18 @@
   el.btnAddBook.addEventListener('click', function () { openBookModal(null); });
   el.btnAddFirst.addEventListener('click', function () { openBookModal(null); });
 
+  /**
+   * 页数输入框的值 → 数字或 null（Day 30 修）。
+   * input.value 永远是字符串；空串代表"没填"（null），不是 0。
+   * 非数字原样返回，交给 Store 去报那句中文错误。
+   */
+  function toPageNumber(v) {
+    var t = String(v === undefined || v === null ? '' : v).trim();
+    if (t === '') return null;
+    var n = Number(t);
+    return (isFinite(n) && Math.floor(n) === n) ? n : t;
+  }
+
   el.btnCancelBook.addEventListener('click', function () { closeBookModal(); });
 
   // 保存（新增或编辑共用）
@@ -604,7 +616,8 @@
       title: el.inputTitle.value,
       author: el.inputAuthor.value,
       coverUrl: el.inputCover.value,
-      totalPages: el.inputTotal.value
+      // Day 30 修：这里原来直接塞 input.value（字符串 "320"），服务端不认，总页数永远存不进云端
+      totalPages: toPageNumber(el.inputTotal.value)
     };
 
     var res = editingId ? Store.updateBook(editingId, payload) : Store.addBook(payload);
@@ -704,7 +717,8 @@
   el.btnSaveProgress.addEventListener('click', function () {
     if (!state.currentBookId) return;
 
-    var res = Store.updateBook(state.currentBookId, { currentPage: el.inputCurrentPage.value });
+    // Day 30 修：同样是从 input 拿的字符串，转成数字再交给 Store
+    var res = Store.updateBook(state.currentBookId, { currentPage: toPageNumber(el.inputCurrentPage.value) });
     if (!res.ok) { showError(res.error || '进度没能保存'); return; }
 
     clearError();
@@ -765,14 +779,21 @@
       return;
     }
 
-    // 删除笔记：先确认一次，避免误删（PRD 3.3 异常处理）
-    if (!window.confirm('确定删除这条笔记吗？\n\n删除后无法恢复。')) return;
+    // 删除笔记：先确认一次，避免误删（PRD 3.3 异常处理 / AC-22）
+    // Day 30：换成站内弹窗，不再是浏览器那个灰框
+    confirmDialog({
+      title: '删除这条笔记？',
+      message: '删除后无法恢复。',
+      okText: '删除'
+    }).then(function (yes) {
+      if (!yes) return;
 
-    var res = Store.deleteNote(noteId);
-    if (!res.ok) { report(res); return; }
+      var res = Store.deleteNote(noteId);
+      if (!res.ok) { report(res); return; }
 
-    clearError();
-    renderNotes(bookId);
+      clearError();
+      renderNotes(bookId);
+    });
   });
 
   // 编辑这本书（AC-8）
@@ -795,17 +816,107 @@
     var cntRes = Store.countNotes(id);
     if (!cntRes.ok) { report(cntRes); return; }   // 数不出来就不删，免得提示不准确
 
-    var msg = '确定删除《' + bookRes.data.title + '》吗？\n\n';
-    if (cntRes.data > 0) msg += '这本书的 ' + cntRes.data + ' 条笔记会一并删除。\n';
-    msg += '删除后无法恢复。';
-    if (!window.confirm(msg)) return;
+    // Day 30：换成站内弹窗
+    var noteCount = cntRes.data;
+    confirmDialog({
+      title: '删除《' + bookRes.data.title + '》？',
+      message: noteCount > 0
+        ? '这本书的 ' + noteCount + ' 条笔记会一并删除。删除后无法恢复。'
+        : '删除后无法恢复。',
+      okText: '删除'
+    }).then(function (yes) {
+      if (!yes) return;
 
-    var res = Store.deleteBook(id);
-    if (!res.ok) { report(res); return; }
+      var res = Store.deleteBook(id);
+      if (!res.ok) { report(res); return; }
 
-    clearError();
-    goList();
+      clearError();
+      goList();
+    });
   });
+
+  /**
+   * 站内确认弹窗（Day 30）。
+   *
+   * 为什么不用 window.confirm：
+   *   它是浏览器画的原生框 —— 灰底、系统字体、按钮样式固定，跟星海主题完全是两张皮。
+   *   移动端上更丑（直接顶在页面中间），而且它**会阻塞整个 JS 线程**。
+   *
+   * 这里复用站内已有的 .modal / .modal-card / .modal-foot 三个类，
+   * 所以配色、圆角、阴影自动跟其他弹窗一致，主题换了它也跟着换。
+   *
+   * @returns Promise<boolean>  点了确定是 true，取消/按 Esc/点遮罩都是 false
+   */
+  function confirmDialog(opts) {
+    var o = opts || {};
+    return new Promise(function (resolve) {
+      var mask = document.createElement('div');
+      mask.className = 'modal';
+      mask.setAttribute('role', 'dialog');
+      mask.setAttribute('aria-modal', 'true');
+
+      var card = document.createElement('div');
+      card.className = 'modal-card';
+
+      var title = document.createElement('h2');
+      title.textContent = o.title || '确认';
+      card.appendChild(title);
+
+      if (o.message) {
+        var text = document.createElement('p');
+        text.className = 'dialog-text';
+        text.textContent = o.message;
+        card.appendChild(text);
+      }
+
+      var foot = document.createElement('div');
+      foot.className = 'modal-foot';
+
+      var cancelBtn = document.createElement('button');
+      cancelBtn.type = 'button';
+      cancelBtn.className = 'btn';
+      cancelBtn.textContent = o.cancelText || '取消';
+
+      var okBtn = document.createElement('button');
+      okBtn.type = 'button';
+      okBtn.className = 'btn ' + (o.danger === false ? 'btn-primary' : 'btn-danger');
+      okBtn.textContent = o.okText || '确定';
+
+      foot.appendChild(cancelBtn);
+      foot.appendChild(okBtn);
+      card.appendChild(foot);
+      mask.appendChild(card);
+      document.body.appendChild(mask);
+
+      // 焦点先落在「取消」上：危险操作不该让一个回车就确认掉
+      setTimeout(function () { cancelBtn.focus(); }, 0);
+
+      var done = false;
+      function close(result) {
+        if (done) return;          // 连点/重复触发只认第一次
+        done = true;
+        document.removeEventListener('keydown', onKey, true);
+        if (mask.parentNode) mask.parentNode.removeChild(mask);
+        resolve(result);
+      }
+      function onKey(e) {
+        if (e.key === 'Escape') { e.preventDefault(); close(false); }
+        // 焦点困在弹窗里：Tab 只在两个按钮之间转（不跑到背后的页面上）
+        if (e.key === 'Tab') {
+          var first = cancelBtn, last = okBtn;
+          if (e.shiftKey && document.activeElement === first) { e.preventDefault(); last.focus(); }
+          else if (!e.shiftKey && document.activeElement === last) { e.preventDefault(); first.focus(); }
+        }
+      }
+
+      document.addEventListener('keydown', onKey, true);
+      cancelBtn.addEventListener('click', function () { close(false); });
+      okBtn.addEventListener('click', function () { close(true); });
+      mask.addEventListener('click', function (e) {
+        if (e.target === mask) close(false);   // 点空白遮罩 = 取消
+      });
+    });
+  }
 
   /* ------------------------------------------------------------ 启动 */
 
