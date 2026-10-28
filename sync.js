@@ -822,7 +822,14 @@
       var before = snap && snap.ok ? JSON.parse(JSON.stringify(snap.data)) : null;
       var r = origUpdate(bookId, patch);            // 先本地
       if (r && r.ok) {
-        pushUpdate(bookId, patch, before).then(null, function (e) { report(e, '修改'); });
+        // ★ Day 30 修：推给云端的是**本地存下来的那一份**，不是入参。
+        //   Store 内部会做类型转换（"320" → 320）、trim、字段白名单，
+        //   这些规范化之后的结果才是真正要同步的东西。
+        //   之前直接推入参，表单来的字符串就原样发给后端，被 Number.isInteger 拒掉 ——
+        //   表现就是「本地看着改好了，一刷新又变回去」。
+        var after = origGet(bookId);
+        var canonical = (after && after.ok && after.data) ? after.data : patch;
+        pushUpdate(bookId, canonical, before).then(null, function (e) { report(e, '修改'); });
       }
       return r;
     };
