@@ -678,8 +678,19 @@
       <button id="btn-new-post" class="btn btn-primary" type="button">发帖</button>
     </header>
 
-    <!-- 热门书籍排行：今日 / 本周 / 本月（按讨论量） -->
-    <div class="box hot-box">
+    <!-- Day 32：搜索**移到页面最上面**，不再放在「最新讨论」框里。
+         原因很实在：热门榜可能排出几十条，把搜索框一路顶到第六七屏，
+         用户找个搜索框得先滚半天。搜索是"找东西"的入口，它必须一直在眼前。 -->
+    <div class="forum-search">
+      <input id="forum-search" type="search" autocomplete="off"
+             placeholder="搜书名、作者或帖子内容…" aria-label="搜索帖子">
+      <button id="btn-forum-search-clear" class="btn btn-ghost" type="button" hidden>清除</button>
+    </div>
+    <p id="forum-search-hint" class="muted forum-search-hint" hidden></p>
+
+    <!-- 热门书籍排行：今日 / 本周 / 本月（按讨论量）。
+         Day 32：只列前 10；搜索时整块让位（id 给 community.js 用） -->
+    <div class="box hot-box" id="hot-box">
       <div class="box-head">
         <h3 class="box-title">热门书籍</h3>
         <div class="hot-tabs" id="hot-tabs">
@@ -698,16 +709,14 @@
         <h3 class="box-title">最新讨论</h3>
       </div>
 
-      <!-- Day 31：论坛搜索。搜书名 / 书的作者 / 正文，由服务端做大小写不敏感的模糊匹配 -->
-      <div class="forum-search">
-        <input id="forum-search" type="search" autocomplete="off"
-               placeholder="搜书名、作者或帖子内容…" aria-label="搜索帖子">
-        <button id="btn-forum-search-clear" class="btn btn-ghost" type="button" hidden>清除</button>
-      </div>
-      <p id="forum-search-hint" class="muted forum-search-hint" hidden></p>
-
       <div id="post-list" class="post-list"></div>
       <p id="post-empty" class="muted">还没有帖子，来发第一篇吧。</p>
+
+      <!-- Day 32：分页。一页 20 篇，还有下一页才露出这个按钮 -->
+      <div class="post-more">
+        <p id="post-more-hint" class="muted post-more-hint" hidden></p>
+        <button id="btn-post-more" class="btn btn-ghost" type="button" hidden>加载更多</button>
+      </div>
     </div>
   </section>
 

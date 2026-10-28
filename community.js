@@ -67,7 +67,10 @@
     authBusy: false,            // 正在提交登录/注册（防连点重复提交）
     composeBusy: false,         // 正在提交发帖（同上）
     searchQuery: '',            // 论坛当前搜索词（空 = 没在搜）
-    searchTimer: null           // 搜索防抖计时器
+    searchTimer: null,          // 搜索防抖计时器
+    postOffset: 0,              // 论坛列表已加载到第几条（下次从这儿往后拉）
+    postTotal: null,            // 服务端说的总篇数（null=不知道；搜索结果条数也用它）
+    postHasMore: false          // 还有没有下一页
   };
 
   /* =============================================================
@@ -200,16 +203,90 @@
    * 搜索为什么放在服务端而不是前端 filter：
    *   前端只能搜"已经拉到手的那些帖子"，帖子一多就不准了（第一页之外的根本没加载）。
    *   搜索的意义就是"找不在眼前的"，所以必须在库里查。
+   *
+   * Day 32：改成**分页**。append=false 是第一页（会清空缓存），
+   * append=true 是「加载更多」（往后接）。不传 append 就是重新从第一页开始 ——
+   * 搜索、清除搜索、发完帖刷新走的都是这条，行为跟以前一样。
+   *
+   * 为什么要 postLoading 这道闸：连点「加载更多」会同时发好几个同样的 offset，
+   * 回来的数据互相覆盖，列表里就会出现重复卡片，或者跳过一整页。
    */
-  function loadPosts(q) {
-    var path = '/api/posts' + (q ? '?q=' + encodeURIComponent(q) : '');
-    return authRequest('GET', path).then(function (data) {
-      var list = (data && data.posts) || [];
-      MOCK_POSTS.length = 0;
-      for (var i = 0; i < list.length; i++) {
-        MOCK_POSTS.push(list[i]);
+  var POST_PAGE_SIZE = 20;   // 一页多少篇（跟服务端 LIMIT_DEFAULT 对齐）
+  var postPending = null;    // { key, promise }：同一个请求正在飞时，别发第二遍
+  var postSeq = 0;           // 请求序号：只认最新那次的结果，慢的旧响应一律丢弃
+
+  function loadPosts(q, append) {
+    var offset = append ? state.postOffset : 0;
+    // 同参数（同一个词 + 同一个起点）的请求如果还在飞，直接把那个 promise 交给调用方。
+    // 为什么不能像原来那样"正在加载就直接返回空数组"：启动时 init 会拉一次、
+    // 路由进论坛页又会拉一次 —— 第二次拿到空数组先渲染，等真数据回来时
+    // 已经没有人再渲染了，页面就永远空着。
+    var key = (q || '') + '@' + offset;
+    if (postPending && postPending.key === key) return postPending.promise;
+
+    var path = '/api/posts?limit=' + POST_PAGE_SIZE + '&offset=' + offset +
+               (q ? '&q=' + encodeURIComponent(q) : '');
+
+    var seq = ++postSeq;
+
+    var promise = authRequest('GET', path).then(
+      function (data) {
+        if (postPending && postPending.key === key) postPending = null;
+        // 已经被更新的请求顶掉了（比如加载更多还没回来，用户先搜了一次）——
+        // 这时把旧结果写进缓存，就会把新列表搅乱。直接丢弃。
+        if (seq !== postSeq) return MOCK_POSTS;
+
+        var list = (data && data.posts) || [];
+
+        if (!append) {
+          MOCK_POSTS.length = 0;
+          for (var i = 0; i < list.length; i++) MOCK_POSTS.push(list[i]);
+        } else {
+          // 翻页期间若有人发了新帖，整个列表会往后挪一格 ——
+          // offset 切出来的那一页可能带上已经显示过的帖子。按 id 挡掉重复。
+          var seen = {};
+          for (var k = 0; k < MOCK_POSTS.length; k++) seen[MOCK_POSTS[k].id] = 1;
+          for (var j = 0; j < list.length; j++) {
+            if (!seen[list[j].id]) MOCK_POSTS.push(list[j]);
+          }
+        }
+
+        // offset 按「服务端实际回了多少条」推进，不按显示新增数 —— 否则去重后会原地打转
+        state.postOffset = offset + list.length;
+        state.postTotal = (data && typeof data.total === 'number') ? data.total : null;
+        state.postHasMore = !!(data && data.hasMore);
+        return MOCK_POSTS;
+      },
+      function (e) {
+        if (postPending && postPending.key === key) postPending = null;
+        throw e;
       }
-      return MOCK_POSTS;
+    );
+
+    postPending = { key: key, promise: promise };
+    return promise;
+  }
+
+  /**
+   * 拉一批帖子，**不写进 MOCK_POSTS**，直接把数组返回。
+   *
+   * 为什么这些列表不能共用论坛那份缓存（Day 32 加入）：
+   *   论坛帖子流现在是分页的，缓存里只有"已经翻到手的那几页"。
+   *   而下面三个列表要的是**完整的一批**，口径完全不一样：
+   *     · 个人主页 —— 某个人发的全部帖子
+   *     · 同书列表 —— 关于某一本书的全部帖子
+   *     · 热门榜   —— 按讨论量聚合，要尽量多的样本
+   *   让它们去筛分页缓存，就会出现"明明发过 50 篇，主页说没发过"这种事。
+   */
+  function fetchPostsList(params) {
+    var p = params || {};
+    var qs = ['limit=' + (p.limit || 100)];
+    if (p.offset) qs.push('offset=' + p.offset);
+    if (p.authorId) qs.push('authorId=' + encodeURIComponent(p.authorId));
+    if (p.title) qs.push('title=' + encodeURIComponent(p.title));
+
+    return authRequest('GET', '/api/posts?' + qs.join('&')).then(function (data) {
+      return (data && data.posts) || [];
     });
   }
 
@@ -410,14 +487,25 @@
     return null;
   }
 
-  // 某用户发的帖子（按时间倒序）
+  /**
+   * 某用户发的帖子（按时间倒序）。
+   *
+   * Day 32：改成**单独向服务端要一份**（userId → 数组），不再从论坛缓存里筛。
+   * 原因很具体：论坛帖子流分页后，缓存里只有"已经翻到手的那几页"，
+   * 拿它去筛人，就会出现「我明明发过 50 篇，主页说我还没发过帖子」。
+   */
+  var userPostsCache = {};   // userId → 数组
+
   function postsByUser(userId) {
-    var out = [];
-    for (var i = 0; i < MOCK_POSTS.length; i++) {
-      if (MOCK_POSTS[i].authorId === userId) out.push(MOCK_POSTS[i]);
-    }
-    out.sort(function (a, b) { return new Date(b.createdAt) - new Date(a.createdAt); });
-    return out;
+    return userPostsCache[userId] || [];
+  }
+
+  function loadUserPosts(userId) {
+    if (userPostsCache[userId]) return Promise.resolve(userPostsCache[userId]);
+    return fetchPostsList({ authorId: userId, limit: 100 }).then(function (list) {
+      userPostsCache[userId] = list;
+      return list;
+    });
   }
 
   // 某用户发的评论（按时间倒序），附带所属帖子标题方便跳转
@@ -660,23 +748,61 @@
    * 4. 论坛：热门排行 + 帖子流
    * ============================================================= */
 
-  // 讨论量 = 帖子数 + 评论数（COMMUNITY_DESIGN.md 6.1）
+  /**
+   * 讨论量 = 帖子数(1) + 评论数（COMMUNITY_DESIGN.md 6.1）。
+   *
+   * Day 32 修：原来只看 post.comments 数组，但**列表接口从来不返回这个数组**，
+   * 只给一个 commentCount 数字。于是 `1 + 0 = 1`，每本书讨论量都是 1，
+   * 热门榜实际上一直是"按时间倒序"，不是"按讨论量"。
+   * 这也是为什么造了压测数据后榜单看起来就是压测书 1、2、3、4…… 排下去。
+   */
   function postHeat(post) {
-    return 1 + (post.comments ? post.comments.length : 0);
+    var n = typeof post.commentCount === 'number'
+      ? post.commentCount
+      : (post.comments ? post.comments.length : 0);
+    return 1 + n;
   }
+
+  /**
+   * 热门榜的样本（Day 32）。最多 100 篇，单独拉一份。
+   *
+   * 为什么不复用论坛那份缓存：帖子流分页后缓存里只有已经翻到的那几页，
+   * 按它聚合出来的"热门书"其实只是"最新 20 篇里的热门书"，会失真。
+   * 拉到之前先用缓存兜着，页面不会空着等网络。
+   */
+  var hotPostsCache = null;
+
+  function loadHotPosts() {
+    if (hotPostsCache) return Promise.resolve(hotPostsCache);
+    return fetchPostsList({ limit: 100 }).then(function (list) {
+      hotPostsCache = list;
+      return list;
+    });
+  }
+
+  /**
+   * 热门榜只列前 N 本（Day 32）。
+   *
+   * 为什么要有这个上限：之前是"算出来多少本就全画多少本"。
+   * 样本扩到 100 篇之后，如果每篇聊的书都不一样，热门榜就会排出 100 条 ——
+   * 一屏才放得下 4~5 条，等于把下面所有内容顶到十屏之外。
+   * 而且排出 100 名也没人会看，第 37 名的"热门"没有意义。
+   */
+  var HOT_TOP_N = 10;
 
   // 按书名聚合讨论量（COMMUNITY_DESIGN.md 6.3）
   function aggregateHot() {
+    var source = hotPostsCache || MOCK_POSTS;
     var map = {};
-    for (var i = 0; i < MOCK_POSTS.length; i++) {
-      var p = MOCK_POSTS[i];
+    for (var i = 0; i < source.length; i++) {
+      var p = source[i];
       if (!map[p.title]) map[p.title] = { title: p.title, author: p.author, coverUrl: p.coverUrl, heat: 0 };
       map[p.title].heat += postHeat(p);
     }
     var arr = [];
     for (var k in map) arr.push(map[k]);
     arr.sort(function (a, b) { return b.heat - a.heat; });
-    return arr;
+    return arr.slice(0, HOT_TOP_N);
   }
 
   function renderHot() {
@@ -762,6 +888,7 @@
         ? '没有找到和「' + state.searchQuery + '」相关的帖子。换个词试试，或者清除搜索看全部。'
         : '还没有帖子，来发第一篇吧。';
       empty.hidden = false;
+      renderPostMore();
       return;
     }
     empty.hidden = true;
@@ -773,6 +900,63 @@
     for (var i = 0; i < posts.length; i++) {
       list.appendChild(buildPostCard(posts[i]));
     }
+    renderPostMore();
+  }
+
+  /**
+   * 「加载更多」按钮 + 已显示计数（Day 32）。
+   *
+   * 两个克制的地方：
+   *   ① 没有下一页就**不显示**按钮 —— 露一个点了没反应的按钮，比不露更糟；
+   *   ② 计数只在"已经翻过页 / 正在搜 / 确实还有更多"时才显示 ——
+   *      一进论坛就顶着「已显示 3 / 3 篇」很吵，那不是用户此刻关心的信息。
+   */
+  function renderPostMore() {
+    var btn = byId('btn-post-more');
+    var hint = byId('post-more-hint');
+
+    if (btn) {
+      if (state.postHasMore) {
+        btn.hidden = false;
+        btn.disabled = false;
+        btn.textContent = '加载更多';
+      } else {
+        btn.hidden = true;
+      }
+    }
+
+    if (hint) {
+      var total = state.postTotal;
+      var loaded = MOCK_POSTS.length;
+      var worthSaying =
+        typeof total === 'number' && total > 0 &&
+        (state.postHasMore || loaded > POST_PAGE_SIZE || !!state.searchQuery);
+      if (worthSaying) {
+        hint.hidden = false;
+        hint.textContent = '已显示 ' + loaded + ' / ' + total + ' 篇';
+      } else {
+        hint.hidden = true;
+      }
+    }
+  }
+
+  /** 点「加载更多」：往后接一页。失败要把按钮恢复，不能让它永远卡在「加载中…」。 */
+  function loadMorePosts() {
+    if (!state.postHasMore) return;
+
+    var btn = byId('btn-post-more');
+    if (btn) { btn.disabled = true; btn.textContent = '加载中…'; }
+
+    loadPosts(state.searchQuery, true).then(
+      function () {
+        renderPosts();
+        renderSearchHint();
+      },
+      function (e) {
+        if (btn) { btn.disabled = false; btn.textContent = '加载更多'; }
+        showError((e && e.message) || '加载失败，请稍后重试');
+      }
+    );
   }
 
   /* ---------------------------------------------------------------
@@ -810,6 +994,11 @@
     var clearBtn = byId('btn-forum-search-clear');
     if (!hint) return;
 
+    // Day 32：搜索时热门榜整块让位。
+    // 搜索结果就渲染在热门榜下面，留着几十条热门书等于把用户刚搜到的东西埋起来。
+    var hotBox = byId('hot-box');
+    if (hotBox) hotBox.hidden = !!state.searchQuery;
+
     if (!state.searchQuery) {
       hint.hidden = true;
       if (clearBtn) clearBtn.hidden = true;
@@ -817,7 +1006,10 @@
     }
     if (clearBtn) clearBtn.hidden = false;
     hint.hidden = false;
-    hint.textContent = '「' + state.searchQuery + '」找到 ' + MOCK_POSTS.length + ' 篇';
+    // Day 32：条数要用服务端给的总数，不能用 MOCK_POSTS.length ——
+    // 那是"已经加载到手的"，搜索命中 200 篇但只拉了第一页时会显示"找到 20 篇"，是假话。
+    var found = (typeof state.postTotal === 'number') ? state.postTotal : MOCK_POSTS.length;
+    hint.textContent = '「' + state.searchQuery + '」找到 ' + found + ' 篇';
   }
 
   function clearForumSearch() {
@@ -1133,6 +1325,11 @@
         }
       }
     );
+    // 热门榜的样本是单独一份（最多 100 篇），拉到后重画一次
+    loadHotPosts().then(
+      function () { renderHot(); },
+      function () { /* 拉不到就继续用缓存算，不打扰 */ }
+    );
   }
 
   // 打开发帖弹窗（清空上次残留）
@@ -1184,6 +1381,10 @@
         byId('modal-compose').hidden = true;
         showSuccess('发布成功！');
         var postId = data && data.post && data.post.id;
+        // 新帖要出现在热门榜和「我的」页里 —— 这两份样本是单独缓存的，先作废。
+        // 不作废的话，发完帖回个人主页还是那句"还没有发过帖子"。
+        hotPostsCache = null;
+        userPostsCache = {};
         // 刷新列表（论坛页上的帖子数、排序都要对），再打开刚发的这篇
         renderForum();
         if (postId) openPost(postId);
@@ -1215,42 +1416,71 @@
     go('/book-posts/' + encodeURIComponent(title));
   }
 
-  // 渲染：只往页面里填内容，不切页面（切页面由路由统一做）
-  function enterBookPosts(title) {
-    var posts = postsByTitle(title);
-    if (posts.length === 0) { showError('这本书还没有讨论'); return false; }
-    state.postFromBook = true;
-    state.lastBookTitle = title;
-
+  /**
+   * 同书列表的渲染（Day 32 从 enterBookPosts 里拆出来）。
+   * 拆开的理由：现在要「先拿缓存画一遍、再被服务端结果覆盖一遍」，
+   * 同一段渲染逻辑得能跑两次，不能和"取数据"焊死在一起。
+   */
+  function renderBookPosts(title, posts) {
     // 头部：封面 + 书名 + 作者 + 帖子数
     var head = byId('book-posts-head');
     head.textContent = '';
-    var cover = document.createElement('div');
-    cover.className = 'cover cover-lg';
-    fillCover(cover, posts[0].title, posts[0].coverUrl);
-    head.appendChild(cover);
+
     var meta = document.createElement('div');
     meta.className = 'detail-meta';
     var h2 = document.createElement('h2');
     h2.textContent = title;
     meta.appendChild(h2);
-    var p = document.createElement('p');
-    p.className = 'muted';
-    var author = posts[0].author || '';
-    var totalComments = 0;
-    for (var i = 0; i < posts.length; i++) totalComments += posts[i].comments ? posts[i].comments.length : 0;
-    p.textContent = (author ? author + ' · ' : '') + posts.length + ' 篇讨论 · ' + totalComments + ' 条评论';
-    meta.appendChild(p);
+
+    if (posts.length) {
+      var cover = document.createElement('div');
+      cover.className = 'cover cover-lg';
+      fillCover(cover, posts[0].title, posts[0].coverUrl);
+      head.appendChild(cover);
+
+      var p = document.createElement('p');
+      p.className = 'muted';
+      var author = posts[0].author || '';
+      // 用 commentCount（接口带回来的），不是 post.comments ——
+      // 列表接口从来不返回 comments 数组，用那个永远是 0 条
+      var totalComments = 0;
+      for (var i = 0; i < posts.length; i++) totalComments += posts[i].commentCount || 0;
+      p.textContent = (author ? author + ' · ' : '') + posts.length + ' 篇讨论 · ' + totalComments + ' 条评论';
+      meta.appendChild(p);
+    }
     head.appendChild(meta);
 
-    // 帖子列表（长度 0 的情况已在上面拦掉，这里一定有内容）
     var list = byId('book-posts-list');
     var empty = byId('book-posts-empty');
     list.textContent = '';
-    empty.hidden = true;
+    empty.hidden = posts.length > 0;
     for (var k = 0; k < posts.length; k++) {
       list.appendChild(buildPostCard(posts[k]));
     }
+  }
+
+  // 渲染：只往页面里填内容，不切页面（切页面由路由统一做）
+  function enterBookPosts(title) {
+    state.postFromBook = true;
+    state.lastBookTitle = title;
+
+    var cached = postsByTitle(title);
+    renderBookPosts(title, cached);   // 手上有的先画出来，页面不空白
+
+    // 缓存里可能不全（论坛帖子流分页后只有翻到的那几页），向服务端要这本书的全部讨论。
+    // 最多 100 篇 —— 一本书的讨论到不了这个量级，真到了也该在列表页做分页。
+    fetchPostsList({ title: title, limit: 100 }).then(
+      function (list) {
+        if (list.length) { renderBookPosts(title, list); return; }
+        if (cached.length === 0) {
+          // 真的一篇都没有：别让人停在一个空页上，退回论坛
+          showError('这本书还没有讨论');
+          go('/forum');
+        }
+      },
+      function () { /* 拉不到就保持缓存里的内容，不打扰用户 */ }
+    );
+
     return true;
   }
 
@@ -2788,6 +3018,17 @@
 
     // 帖子 + 评论
     box.appendChild(buildActivity(me.id));
+
+    // Day 32：帖子单独向服务端要（论坛缓存分页后只有一部分，筛不得）。
+    // 拿到后重画一次自己；第二次进来缓存已有，不会无限递归。
+    if (!userPostsCache[me.id]) {
+      loadUserPosts(me.id).then(
+        function () {
+          if (state.currentUser && state.currentUser.id === me.id) renderMe();
+        },
+        function () { /* 拉不到就先显示空，不打扰 */ }
+      );
+    }
   }
 
   // 打开别人主页
@@ -2858,6 +3099,16 @@
         function () { /* 拉不到就保持空的，不打扰用户 */ }
       );
     }
+
+    // Day 32：帖子单独向服务端要（论坛缓存分页后只有一部分，筛不得）
+    if (!userPostsCache[user.id]) {
+      loadUserPosts(user.id).then(
+        function () {
+          if (state.profileUserId === user.id) renderProfile(user);
+        },
+        function () { /* 拉不到就先显示空，不打扰 */ }
+      );
+    }
   }
 
   /* =============================================================
@@ -2878,6 +3129,10 @@
     }
     var searchClear = byId('btn-forum-search-clear');
     if (searchClear) searchClear.addEventListener('click', clearForumSearch);
+
+    // 「加载更多」（Day 32）—— 同样只在论坛页存在
+    var moreBtn = byId('btn-post-more');
+    if (moreBtn) moreBtn.addEventListener('click', loadMorePosts);
 
     // 发帖按钮：打开发帖弹窗（登录后才可发）
     byId('btn-new-post').addEventListener('click', function () {

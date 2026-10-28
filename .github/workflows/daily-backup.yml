@@ -1,0 +1,76 @@
+name: 每日数据库备份
+
+# ============================================================
+# 为什么要这个文件（Day 32）
+# ------------------------------------------------------------
+# CloudBase 体验版（共享集群）不提供任何平台备份 ——
+# 控制台「平台管理 → 备份」里写的是「当前共享集群暂不提供相关能力」。
+# 在那之前，一句手滑的 `DELETE FROM posts;` 就是永久损失。
+#
+# 这个 workflow 做的事很朴素：每天定时 curl 一下自己的备份接口，
+# 让云函数把 8 张表导成 JSON 存进库里的 backups 表。
+#
+# ⚠️ 它防得住「操作失误」，防不住「整个库没了」——
+#    备份和原数据在同一个库。要防后者得把备份搬到库外（另一个方案）。
+#
+# ⚠️ 为什么定时器放在 GitHub 而不是云函数：
+#    community 是 HTTP 型函数（自己起 http server），接不了云函数的定时触发器，
+#    要接就得再新建一个普通函数，多一份部署维护。GitHub Actions 免费额度够用，
+#    而且日志直接在这儿看，比翻云函数日志方便。
+# ============================================================
+
+on:
+  schedule:
+    # ⚠️ GitHub 的 cron 走 **UTC**，不是北京时间。
+    #    UTC 18:00 = 北京时间次日 02:00 —— 挑凌晨是因为这时候没人在用。
+    #    （GitHub 高峰期 cron 可能延迟几分钟到半小时，能接受）
+    - cron: '0 18 * * *'
+  # 允许在 Actions 页面手动点「Run workflow」跑一次，改完东西想立刻备一份时用
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: 调备份接口
+        env:
+          # 这两个都不是密码明文写在仓库里，是 GitHub 的 Secrets：
+          # 仓库 Settings → Secrets and variables → Actions → New repository secret
+          # public 仓库的 Secrets 只有 Actions 能读，别人看仓库看不到值
+          API_BASE: ${{ secrets.CLOUD_API_BASE }}
+          BACKUP_TOKEN: ${{ secrets.BACKUP_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          if [ -z "${API_BASE:-}" ] || [ -z "${BACKUP_TOKEN:-}" ]; then
+            echo "缺少 Secrets：CLOUD_API_BASE 或 BACKUP_TOKEN 没配"
+            exit 1
+          fi
+
+          echo "目标：$API_BASE/api/backup/run"
+
+          # --max-time 180：八张表全量导出，给足三分钟
+          resp=$(curl -sS --max-time 180 -X POST "$API_BASE/api/backup/run" \
+                   -H "X-Backup-Token: $BACKUP_TOKEN" \
+                   -w '\nHTTP=%{http_code}') || {
+            echo "curl 失败（网络不通 / 域名不对 / 超时）"
+            exit 1
+          }
+
+          echo "返回：$resp"
+
+          # ⚠️ 本项目接口的业务失败一律 HTTP 200 + {ok:false}，
+          #    所以**不能只看状态码**，必须看返回体里的 ok 字段。
+          echo "$resp" | grep -q '"ok":true' || {
+            echo "备份失败：接口回了 ok:false 或不是预期形状"
+            exit 1
+          }
+
+          echo "备份完成"
+
+      # ⚠️ 一条运维常识，写在这儿免得以后踩：
+      #    GitHub 会在仓库**连续 60 天没有任何提交活动**后自动停用定时任务，
+      #    并给你发邮件。停用后手动 Run 仍然可用，但定时不再触发。
+      #    所以如果哪天发现快照断了一个月，先去看看 Actions 是不是被自动禁用了。

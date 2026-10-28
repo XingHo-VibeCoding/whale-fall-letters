@@ -28,8 +28,11 @@
 const fs = require('fs');
 const path = require('path');
 
-// 七张表，顺序有意义：恢复时必须先建被依赖的（books 在 notes 之前，users 在 posts/messages 之前）
-const TABLES = ['users', 'books', 'notes', 'posts', 'comments', 'messages', 'sessions'];
+// 八张表，顺序有意义：恢复时必须先建被依赖的（books 在 notes 之前，users 在 posts/messages 之前）
+// ⚠️ Day 32 修：原来漏了 comment_likes —— Day 31 加点赞功能时新增的表没同步到这里，
+//    结果"完整备份"里其实没有点赞记录，而且不会报错。
+//    加新表时**必须同时**改这三处：这里、restore-pg.js 的 ORDER、云函数 db.js 的 BACKUP_TABLES。
+const TABLES = ['users', 'books', 'notes', 'posts', 'comments', 'messages', 'sessions', 'comment_likes'];
 
 const BASE = process.env.PG_API_BASE || 'https://reading-sea-d7gd8l7o78b7304ae.api.tcloudbasegateway.com';
 const KEY = (process.env.PG_API_KEY || '').trim();

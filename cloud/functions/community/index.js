@@ -6,7 +6,9 @@
  *   刷新页面就没了 —— 所以"别人能看到我的评论"这件事从来没成立过。
  *
  * 本函数提供四个接口：
- *   GET  /api/posts                 帖子列表（公开，不用登录也能看）
+ *   GET  /api/posts?limit=20&offset=0&q=xxx
+ *                                   帖子列表（公开，不用登录也能看）
+ *                                   Day 32 起必须分页：默认一页 20 篇，最多 100 篇
  *   GET  /api/posts/:id             帖子详情 + 该帖全部评论（公开）
  *   POST /api/posts                 发帖（★ 必须登录）
  *   POST /api/posts/:id/comments    发评论（★ 必须登录）
@@ -39,7 +41,10 @@ const COMMENT_CONTENT_MAX = 1000;
 const MESSAGE_MAX = 1000;          // 单条私信正文上限
 const SEARCH_MAX = 50;             // 搜索词上限（再长也没人这么搜，防滥用）
 
-const LIMIT_MAX = 100;
+const LIMIT_DEFAULT = 20;          // 不传 limit 时一页给 20 篇
+const LIMIT_MAX = 100;             // 一页最多 100 篇（再多前端也消化不了，还容易超时）
+const OFFSET_MAX = 100000;         // offset 上限，防止离谱值把库拖住
+const BACKUP_KEEP = 7;             // 快照只留最近 7 份（一天一份 = 一周）
 const BODY_MAX_BYTES = 100 * 1024;
 
 // ---------- 回包 ----------
@@ -52,6 +57,38 @@ function send(res, payload) {
 
 function fail(res, message) {
   send(res, { ok: false, error: message });
+}
+
+/**
+ * 解析分页参数。两个都不传也能跑（走默认 20 篇 / 第 0 条）。
+ *
+ * 校验规矩：给了就必须合法，不合法直接报错，不悄悄改成默认值 ——
+ * 悄悄改会让前端以为"传了 500 就是 500 篇"，实际只给了 20，这种沉默的错误最难查。
+ *
+ * 返回 { limit, offset } 或 { error: "人话" }。
+ */
+function readPage(url) {
+  const out = { limit: LIMIT_DEFAULT, offset: 0 };
+
+  const rawLimit = url.searchParams.get("limit");
+  if (rawLimit !== null && rawLimit !== "") {
+    const n = Number(rawLimit);
+    if (!Number.isInteger(n) || n <= 0) {
+      return { error: "limit 必须是正整数，例如 /api/posts?limit=20" };
+    }
+    out.limit = Math.min(n, LIMIT_MAX);
+  }
+
+  const rawOffset = url.searchParams.get("offset");
+  if (rawOffset !== null && rawOffset !== "") {
+    const n = Number(rawOffset);
+    if (!Number.isInteger(n) || n < 0) {
+      return { error: "offset 必须是 0 或正整数，例如 /api/posts?offset=20" };
+    }
+    out.offset = Math.min(n, OFFSET_MAX);
+  }
+
+  return out;
 }
 
 function describeError(err) {
@@ -67,6 +104,18 @@ function describeError(err) {
 
 function beijingTime() {
   return new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace("T", " ").slice(0, 19);
+}
+
+/**
+ * 备份快照的 label，形如 `20261028-0200`（北京时间）。
+ *
+ * 为什么不用随机 id 当 label：出事那天人要判断的是"这份是哪天的数据"，
+ * 形如 20261028-0200 一眼就知道是 10 月 28 日凌晨 2 点那份。
+ * 云函数容器的时区是 UTC，所以这里手动 +8，和日志口径保持一致。
+ */
+function beijingLabel() {
+  const t = new Date(Date.now() + 8 * 3600 * 1000).toISOString(); // 2026-10-28T02:00:00.000Z
+  return t.slice(0, 10).replace(/-/g, "") + "-" + t.slice(11, 16).replace(":", "");
 }
 
 // 日志里不打印 token、不打印正文（正文可能是用户私密想法）
@@ -333,6 +382,64 @@ const server = http.createServer((req, res) => {
     return fail(res, "服务端未配置数据源凭证（环境变量 PG_API_KEY），请联系站长");
   }
 
+  // ================ 备份（Day 32） ================
+  //
+  // 为什么要自己造：CloudBase 体验版（共享集群）的控制台「平台管理 → 备份」
+  // 明确写着「当前共享集群暂不提供相关能力」—— 项目在这之前是**零备份**。
+  //
+  // ⚠️ 鉴权用独立的请求头 X-Backup-Token，**不复用用户登录 token**：
+  //    备份是"机器定时干的事"，不该拿某个人的账号凭证来做，
+  //    否则那个人退出登录、token 过期，备份就静默停了。
+  if (url.pathname === "/api/backup/run" || url.pathname === "/api/backup/list") {
+    const expect = (process.env.BACKUP_TOKEN || "").trim();
+    const got = String(req.headers["x-backup-token"] || "").trim();
+
+    if (!expect) {
+      log(req.method, url.pathname, "500", "缺少 BACKUP_TOKEN");
+      return fail(res, "服务端未配置备份口令（环境变量 BACKUP_TOKEN）");
+    }
+    // 定时任务是一天一次，多试几次没意义；直接比，不做时长均衡（内部接口）
+    if (got !== expect) {
+      log(req.method, url.pathname, "401", "备份口令不对");
+      return fail(res, "备份口令不对");
+    }
+
+    if (req.method === "POST" && url.pathname === "/api/backup/run") {
+      const label = beijingLabel();
+      return db
+        .createBackup(label, baseUrl, apiKey)
+        .then((info) => db.pruneBackups(BACKUP_KEEP, baseUrl, apiKey).then((removed) => ({ info, removed })))
+        .then(({ info, removed }) => {
+          log(
+            "POST",
+            "/api/backup/run",
+            "200",
+            `快照 ${info.label}：${info.rowCount} 行 / ${info.sizeBytes} 字节，清理旧份 ${removed}`
+          );
+          send(res, { ok: true, data: Object.assign({}, info, { removed }) });
+        })
+        .catch((err) => {
+          log("POST", "/api/backup/run", "500", err.message);
+          fail(res, describeError(err));
+        });
+    }
+
+    if (req.method === "GET" && url.pathname === "/api/backup/list") {
+      return db
+        .listBackups(baseUrl, apiKey)
+        .then((rows) => {
+          log("GET", "/api/backup/list", "200", `${rows.length} 份快照`);
+          send(res, { ok: true, data: { backups: rows } });
+        })
+        .catch((err) => {
+          log("GET", "/api/backup/list", "500", err.message);
+          fail(res, describeError(err));
+        });
+    }
+
+    return fail(res, "备份接口只支持 POST /api/backup/run 和 GET /api/backup/list");
+  }
+
   // ================ 私信（Day 30 第三阶段） ================
   //
   // 三个接口都要求登录 —— 私信天然是私密的，没有"公开看"的说法。
@@ -500,18 +607,14 @@ const server = http.createServer((req, res) => {
     return;
   }
 
-  // ---------- GET /api/posts（列表） ----------
+  // ---------- GET /api/posts（列表，分页） ----------
+  // Day 32：加了 offset，一次只回一页。返回里带 total / hasMore 供前端判断还有没有。
   if (req.method === "GET" && m.list) {
-    const rawLimit = url.searchParams.get("limit");
-    let limit;
-    if (rawLimit !== null && rawLimit !== "") {
-      const n = Number(rawLimit);
-      if (!Number.isInteger(n) || n <= 0) {
-        fail(res, "limit 必须是正整数，例如 /api/posts?limit=5");
-        log("GET", "/api/posts", "400", "limit 非法");
-        return;
-      }
-      limit = Math.min(n, LIMIT_MAX);
+    const page = readPage(url);
+    if (page.error) {
+      fail(res, page.error);
+      log("GET", "/api/posts", "400", "分页参数非法");
+      return;
     }
 
     // Day 31：q = 搜索关键词（书名 / 书的作者 / 正文，大小写不敏感）
@@ -522,20 +625,55 @@ const server = http.createServer((req, res) => {
       return;
     }
 
+    // Day 32：两个精确过滤。个人主页传 authorId，同书列表传 title。
+    // 上限沿用帖子字段的长度限制（title 200 / id 40），超了就是有人在乱试。
+    const authorId = (url.searchParams.get("authorId") || "").trim();
+    const title = (url.searchParams.get("title") || "").trim();
+    if (authorId.length > 40 || title.length > TITLE_MAX) {
+      fail(res, "筛选条件太长了");
+      log("GET", "/api/posts", "400", "筛选条件过长");
+      return;
+    }
+
     return db
-      .fetchPosts(limit, baseUrl, apiKey, q)
-      .then((rows) => {
+      .fetchPosts({ limit: page.limit, offset: page.offset, q, authorId, title }, baseUrl, apiKey)
+      .then(({ rows, total }) => {
         const ids = rows.map((r) => r.id);
         return Promise.all([
           db.fetchUsersByIds(rows.map((r) => r.authorId), baseUrl, apiKey),
           db.countCommentsByPostIds(ids, baseUrl, apiKey),
-          Promise.resolve(rows),
+          Promise.resolve({ rows, total }),
         ]);
       })
-      .then(([userMap, counts, rows]) => {
-        const posts = rows.map((r) => shapePost(r, userMap, counts[r.id]));
-        log("GET", "/api/posts", "200", q ? `搜「${q}」命中 ${posts.length} 篇` : `返回 ${posts.length} 篇`);
-        send(res, { ok: true, data: { posts, query: q || "" } });
+      .then(([userMap, counts, pack]) => {
+        const posts = pack.rows.map((r) => shapePost(r, userMap, counts[r.id]));
+
+        // 还有没有下一页：库侧给了总数就按总数算；数不出来时退回「这一页满了就当作还有」。
+        // 前者精确，后者最多多给用户一次空点击 —— 总比"明明还有却说没有了"好。
+        const hasMore =
+          pack.total === null
+            ? posts.length === page.limit
+            : page.offset + posts.length < pack.total;
+
+        log(
+          "GET",
+          "/api/posts",
+          "200",
+          q
+            ? `搜「${q}」第 ${page.offset}~${page.offset + posts.length} 篇，共 ${pack.total === null ? "?" : pack.total} 篇`
+            : `返回 ${posts.length} 篇（offset=${page.offset}，共 ${pack.total === null ? "?" : pack.total}）`
+        );
+        send(res, {
+          ok: true,
+          data: {
+            posts,
+            query: q || "",
+            total: pack.total,
+            hasMore,
+            limit: page.limit,
+            offset: page.offset,
+          },
+        });
       })
       .catch((err) => {
         log("GET", "/api/posts", "500", err.message);
